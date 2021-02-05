@@ -1,0 +1,24 @@
+---
+MainSourceFile:  '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/dpct_output/tensor_algebra.h'
+Replacements:
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/tensor_algebra.h'
+    Offset:          8311
+    Length:          0
+    ReplacementText: ' dpct_type_be576f'
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/tensor_algebra.h'
+    Offset:          8540
+    Length:          0
+    ReplacementText: ' dpct_type_97b022'
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/tensor_algebra.h'
+    Offset:          8913
+    Length:          0
+    ReplacementText: ' dpct_type_d3db4b'
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/tensor_algebra.h'
+    Offset:          9036
+    Length:          0
+    ReplacementText: ' dpct_type_3ae32d'
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/tensor_algebra.h'
+    Offset:          9422
+    Length:          0
+    ReplacementText: ' dpct_type_678bff'
+...

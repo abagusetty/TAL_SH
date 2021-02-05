@@ -1,0 +1,47 @@
+---
+MainSourceFile:  '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/dpct_output/device_algebra.h'
+Replacements:
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/device_algebra.h'
+    Offset:          3803
+    Length:          0
+    ReplacementText: '#include <CL/sycl.hpp>
+#include <dpct/dpct.hpp>
+'
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/device_algebra.h'
+    Offset:          3848
+    Length:          0
+    ReplacementText: '
+#include <mkl_blas_sycl.hpp>
+#include <mkl_lapack_sycl.hpp>
+#include <mkl_sycl_types.hpp>
+#include <dpct/blas_utils.hpp>
+'
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/device_algebra.h'
+    Offset:          3866
+    Length:          18
+    ReplacementText: ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/device_algebra.h'
+    Offset:          3884
+    Length:          26
+    ReplacementText: ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/device_algebra.h'
+    Offset:          3911
+    Length:          23
+    ReplacementText: ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/device_algebra.h'
+    Offset:          7293
+    Length:          0
+    ReplacementText: ' dpct_type_bcaeaf'
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/device_algebra.h'
+    Offset:          7902
+    Length:          0
+    ReplacementText: ' dpct_type_fe6f66'
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/device_algebra.h'
+    Offset:          8210
+    Length:          0
+    ReplacementText: ' dpct_type_ead0ba'
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/device_algebra.h'
+    Offset:          9767
+    Length:          0
+    ReplacementText: ' dpct_type_3b5bd0'
+...

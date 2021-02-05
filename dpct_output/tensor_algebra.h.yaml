@@ -1,0 +1,44 @@
+---
+MainSourceFile:  '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/dpct_output/tensor_algebra.h'
+Replacements:
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/tensor_algebra.h'
+    Offset:          8346
+    Length:          0
+    ReplacementText: ' dpct_type_ffc467'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/tensor_algebra.h'
+    Offset:          8575
+    Length:          0
+    ReplacementText: ' dpct_type_972507'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/tensor_algebra.h'
+    Offset:          8948
+    Length:          0
+    ReplacementText: ' dpct_type_7ca4ef'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/tensor_algebra.h'
+    Offset:          9071
+    Length:          0
+    ReplacementText: ' dpct_type_25ab56'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/tensor_algebra.h'
+    Offset:          9457
+    Length:          0
+    ReplacementText: ' dpct_type_b13c0b'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+...

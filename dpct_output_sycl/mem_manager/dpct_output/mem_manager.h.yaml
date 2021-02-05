@@ -1,0 +1,8 @@
+---
+MainSourceFile:  '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/dpct_output/mem_manager.h'
+Replacements:
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TAL_SH/dpct_output_sycl/mem_manager/mem_manager.h'
+    Offset:          1032
+    Length:          0
+    ReplacementText: ' dpct_type_6654b3'
+...

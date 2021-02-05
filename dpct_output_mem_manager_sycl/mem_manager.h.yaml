@@ -1,0 +1,12 @@
+---
+MainSourceFile:  '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/dpct_output/mem_manager.h'
+Replacements:
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/mem_manager.h'
+    Offset:          1032
+    Length:          0
+    ReplacementText: ' dpct_type_e2e43d'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+...

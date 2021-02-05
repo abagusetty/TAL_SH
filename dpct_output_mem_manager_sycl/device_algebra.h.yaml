@@ -1,0 +1,81 @@
+---
+MainSourceFile:  '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/dpct_output/device_algebra.h'
+Replacements:
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/device_algebra.h'
+    Offset:          3803
+    Length:          0
+    ReplacementText: '#include <CL/sycl.hpp>
+#include <dpct/dpct.hpp>
+'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/device_algebra.h'
+    Offset:          3848
+    Length:          0
+    ReplacementText: '
+#include <oneapi/mkl.hpp>
+#include <dpct/blas_utils.hpp>
+'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/device_algebra.h'
+    Offset:          3866
+    Length:          18
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/device_algebra.h'
+    Offset:          3884
+    Length:          26
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/device_algebra.h'
+    Offset:          3911
+    Length:          23
+    ReplacementText: ''
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/device_algebra.h'
+    Offset:          7293
+    Length:          0
+    ReplacementText: ' dpct_type_c9df37'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/device_algebra.h'
+    Offset:          7902
+    Length:          0
+    ReplacementText: ' dpct_type_649a53'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/device_algebra.h'
+    Offset:          8210
+    Length:          0
+    ReplacementText: ' dpct_type_326cea'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+  - FilePath:        '/gpfs/jlse-fs0/users/abagusetty/projects/TALSH_latest/my_conversion/device_algebra.h'
+    Offset:          9767
+    Length:          0
+    ReplacementText: ' dpct_type_ff1f7b'
+    ConstantFlag:    ''
+    ConstantOffset:  0
+    InitStr:         ''
+    NewHostVarName:  ''
+...
