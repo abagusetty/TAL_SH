@@ -100,9 +100,16 @@ User-provided Alpha factors for gpu_tensor_block_contract() and
 
 #include <chrono>
 
-template <typename T>
-using localAcc = cl::sycl::accessor<T, 2, cl::sycl::access::mode::read_write, cl::sycl::access::target::local>;
+template <typename T, int DIM>
+using local_accessor =
+    cl::sycl::accessor<T, DIM, cl::sycl::access::mode::read_write,
+                       cl::sycl::access::target::local>;
+template <typename T, int DIM>
+using constant_accessor =
+    cl::sycl::accessor<T, DIM, cl::sycl::access::mode::read,
+                       cl::sycl::access::target::constant>;
 
+template <typename T, int DIM> using globalBuffer = cl::sycl::buffer<T, DIM>;
 
 template <typename T>
 using atomic_ref = cl::sycl::ONEAPI::atomic_ref< T, cl::sycl::ONEAPI::memory_order::relaxed,
@@ -125,7 +132,7 @@ static cl::sycl::queue **sycl_stream_ptr(int gpu_num, int sycl_stream_handle);
 static int sycl_event_get(int gpu_num, int *sycl_event_handle);
 static int sycl_event_release(int gpu_num, int sycl_event_handle);
 static cl::sycl::event *sycl_event_ptr(int gpu_num, int sycl_event_handle);
-static void limit_cuda_blocks2d(int max_blocks, int *bx, int *by);
+static void limit_sycl_workgroups2d(int max_blocks, int *bx, int *by);
 static int tens_op_best_gpu(const tensBlck_t *tens0 = nullptr,
                             const tensBlck_t *tens1 = nullptr,
                             const tensBlck_t *tens2 = nullptr);
@@ -138,46 +145,44 @@ static int sycl_task_set_prefactor(cudaTask_t *sycl_task,
 static int sycl_task_record(cudaTask_t *sycl_task, unsigned int coh_ctrl,
                             unsigned int err_code = 0);
 static int sycl_task_finalize(cudaTask_t *sycl_task);
-// CUDA KERNELS:
+// SYCL KERNELS:
 template <typename T>
 void gpu_array_norm2__(size_t tsize, const T *__restrict__ arr,
-                       volatile double *bnorm2, sycl::nd_item<3> item_ct,
+                       volatile double *bnorm2, cl::sycl::nd_item<2>& item,
                        uint8_t *local_ptr, int *norm2_wr_lock);
 template <typename T>
-void gpu_array_init__(size_t tsize, T *arr, T val, sycl::nd_item<3> item_ct);
+void gpu_array_init__(size_t tsize, T *arr, T val, cl::sycl::nd_item<1> &item);
 template <typename T>
 void gpu_scalar_multiply__(const T *left_arg, const T *right_arg, T *dest_arg,
                            T alpha, int left_conj = 0, int right_conj = 0);
 template <typename T>
-void gpu_array_scale__(size_t tsize, T *arr, T alpha,
-                       sycl::nd_item<1> &item_ct);
+void gpu_array_scale__(size_t tsize, T *arr, T alpha, sycl::nd_item<1> &item);
 template <typename T>
 void gpu_array_add__(size_t tsize, T *__restrict__ arr0,
                      const T *__restrict__ arr1, T alpha,
-                     cl::sycl::nd_item<1> &item_ct, int left_conj = 0);
+                     cl::sycl::nd_item<1> &item, int left_conj = 0);
 template <typename T>
 void gpu_array_add__(size_t tsize, T *__restrict__ arr0,
                      const T *__restrict__ arr1, const T *__restrict__ scalar,
-                     T alpha, cl::sycl::nd_item<1> &item_ct, int left_conj = 0);
+                     T alpha, cl::sycl::nd_item<1> &item, int left_conj = 0);
 template <typename T>
 void gpu_array_dot_product__(size_t tsize, const T *arr1, const T *arr2,
                              volatile T *dprod, T alpha,
-                             cl::sycl::nd_item<3> &item_ct, uint8_t *local_ptr,
+                             cl::sycl::nd_item<1> &item, uint8_t *local_ptr,
                              int *dot_product_wr_lock, int left_conj = 0,
                              int right_conj = 0);
 template <typename T>
 void gpu_array_product__(size_t tsize1, const T *arr1, size_t tsize2,
-                         const T *arr2, T *arr0, T alpha,
-                         sycl::nd_item<3> item_ct, T *lbuf, T *rbuf,
-                         talshComplex4 *lbuf, talshComplex4 *rbuf,
-                         talshComplex8 *lbuf, talshComplex8 *rbuf,
-                         int left_conj = 0, int right_conj = 0);
+                         const T *arr2, T *arr0, T alpha, cl::sycl::nd_item<2>& item,
+                         T *lbuf, T *rbuf, talshComplex4 *lbuf,
+                         talshComplex4 *rbuf, talshComplex8 *lbuf,
+                         talshComplex8 *rbuf, int left_conj = 0,
+                         int right_conj = 0);
 template <typename T>
 void gpu_tensor_block_add_dlf__(
     int dmo, int drc, int dim_num, int const_args_pos,
     const T *__restrict__ tens_in, T *__restrict__ tens_out,
-    sycl::nd_item<3> item_ct,
-    dpct::accessor<int, dpct::device, 2> const_args_dims,
+    sycl::nd_item<3> item, dpct::accessor<int, dpct::device, 2> const_args_dims,
     dpct::accessor<int, dpct::device, 2> const_args_prmn, int *gpu_error_count,
     T *buf0, float *val, size_t *base_in, size_t *base_out, size_t *ftb,
     size_t *gtb, int *htb, int *stb, int *dim_in, int *dim_out, int *o2n,
@@ -189,20 +194,19 @@ template <typename T>
 void gpu_tensor_block_copy_dlf__(
     int dmo, int drc, int dim_num, int const_args_pos,
     const T *__restrict__ tens_in, T *__restrict__ tens_out,
-    sycl::nd_item<3> item_ct,
-    dpct::accessor<int, dpct::device, 2> const_args_dims,
-    dpct::accessor<int, dpct::device, 2> const_args_prmn, int *gpu_error_count,
-    T *buf0, float *val, size_t *base_in, size_t *base_out, size_t *ftb,
-    size_t *gtb, int *htb, int *stb, int *dim_in, int *dim_out, int *o2n,
-    int *n2o, int *pri, int *tmp0, int *err_code, int *minor, int *minor_in,
-    int *minor_out, int *s1_ind, int *s1_ond, int *s1_step, int *s1_dim,
-    int *s2_ind, int *s2_ond, int *s2_step, int *s2_dim, int *ns1, int *ns2,
-    size_t *vol, size_t *vol_ext);
+    cl::sycl::nd_item<1> &item, constant_accessor<int, 2> &const_args_dims,
+    constant_accessor<int, 2> &const_args_prmn, int *gpu_error_count, T *buf0,
+    float *val, size_t *base_in, size_t *base_out, size_t *ftb, size_t *gtb,
+    int *htb, int *stb, int *dim_in, int *dim_out, int *o2n, int *n2o, int *pri,
+    int *tmp0, int *err_code, int *minor, int *minor_in, int *minor_out,
+    int *s1_ind, int *s1_ond, int *s1_step, int *s1_dim, int *s2_ind,
+    int *s2_ond, int *s2_step, int *s2_dim, int *ns1, int *ns2, size_t *vol,
+    size_t *vol_ext);
 template <typename T>
 void gpu_tensor_block_copy_cmplx_split_in_dlf__(
     int dmo, int drc, int dim_num, int const_args_pos,
     const T *__restrict__ tens_in, T *__restrict__ tens_out,
-    sycl::nd_item<3> item_ct,
+    cl::sycl::nd_item<1> &item,
     dpct::accessor<int, dpct::device, 2> const_args_dims,
     dpct::accessor<int, dpct::device, 2> const_args_prmn, int *gpu_error_count,
     T *buf0, float *val, size_t *base_in, size_t *base_out, size_t *ftb,
@@ -215,8 +219,7 @@ template <typename T>
 void gpu_tensor_block_copy_cmplx_split_out_dlf__(
     int dmo, int drc, int dim_num, int const_args_pos,
     const T *__restrict__ tens_in, T *__restrict__ tens_out,
-    sycl::nd_item<3> item_ct,
-    dpct::accessor<int, dpct::device, 2> const_args_dims,
+    sycl::nd_item<3> item, dpct::accessor<int, dpct::device, 2> const_args_dims,
     dpct::accessor<int, dpct::device, 2> const_args_prmn, int *gpu_error_count,
     T *buf0, float *val, size_t *base_in, size_t *base_out, size_t *ftb,
     size_t *gtb, int *htb, int *stb, int *dim_in, int *dim_out, int *o2n,
@@ -228,16 +231,15 @@ template <typename T>
 void gpu_tensor_block_copy_scatter_dlf__(
     int dmo, int drc, int dim_num, int const_args_pos,
     const T *__restrict__ tens_in, T *__restrict__ tens_out,
-    sycl::nd_item<3> item_ct,
-    dpct::accessor<int, dpct::device, 2> const_args_dims,
-    dpct::accessor<int, dpct::device, 2> const_args_prmn, int *gpu_error_count,
-    int *n2o, size_t *vol, size_t *base_in, size_t *base_out);
+    cl::sycl::nd_item<1> &item, constant_accessor<int, 2> &const_args_dims,
+    constant_accessor<int, 2> &const_args_prmn, int *gpu_error_count, int *n2o,
+    size_t *vol, size_t *base_in, size_t *base_out);
 template <typename T>
 void gpu_matrix_multiply_tn__(size_t ll, size_t lr, size_t lc, const T *arg1,
                               const T *arg2, T *arg0, T alpha,
-                              cl::sycl::nd_item<2>& item_ct, int *gpu_error_count,
-                              dpct::accessor<T, dpct::local, 2> buf1,
-                              dpct::accessor<T, dpct::local, 2> buf2);
+                              cl::sycl::nd_item<2> &item, int *gpu_error_count,
+                              local_accessor<T, 2> &buf1,
+                              local_accessor<T, 2> &buf2);
 template <typename T>
 void gpu_matrix_multiply_nt__(size_t ll, size_t lr, size_t lc, const T *arg1,
                               const T *arg2, T *arg0, T alpha);
@@ -276,12 +278,21 @@ static int SYCLEventFFE[MAX_GPUS_PER_NODE]; // number of free handles left in SY
 // Mapped slab of tensor operation prefactors for GPU usage:
 static slab_t prefactors;        // mapped slab of prefactors
 static void *gpu_prefs_base_ptr; // mapped device pointer of the slab base
+
 // Slab of GPU constant memory arguments for each GPU (managed by
 // "mem_manager.cpp"):
-dpct::device_memory<int, 2> const_args_dims(MAX_GPU_ARGS, MAX_TENSOR_RANK); // storage for device constant memory
-// arguments: dimension extents
-dpct::device_memory<int, 2> const_args_prmn(MAX_GPU_ARGS, MAX_TENSOR_RANK); // storage for device constant memory
-// arguments: permutation
+globalBuffer<int, 2> const_args_dims(cl::sycl::range<2>(
+    MAX_GPU_ARGS, MAX_TENSOR_RANK)); // storage for device constant memory
+                                     // arguments: dimension extents
+globalBuffer<int, 2> const_args_prmn(cl::sycl::range<2>(
+    MAX_GPU_ARGS, MAX_TENSOR_RANK)); // storage for device constant memory
+                                     // arguments: permutation
+
+// dpct::device_memory<int, 2> const_args_dims(MAX_GPU_ARGS, MAX_TENSOR_RANK);
+// // storage for device constant memory arguments: dimension extents
+// dpct::device_memory<int, 2> const_args_prmn(MAX_GPU_ARGS, MAX_TENSOR_RANK);
+// // storage for device constant memory arguments: permutation
+
 // GPU error control and debugging for each GPU:
 dpct::device_memory<int, 0> gpu_error_count(0); // total number of CUDA errors registered on device till the current moment
 dpct::device_memory<int, 1> gpu_debug_dump(GPU_DEBUG_DUMP_SIZE); // debug dump
@@ -327,7 +338,7 @@ dpct::device_memory<int, 0> dot_product_wr_lock(0); // write lock shared by all 
 // REAL:
 template <typename T>
 void gpu_array_norm2__(size_t tsize, const T *__restrict__ arr,
-                       volatile double *bnorm2, sycl::nd_item<3> item_ct,
+                       volatile double *bnorm2, cl::sycl::nd_item<1> &item,
                        uint8_t *local_ptr, int *norm2_wr_lock)
 /** Computes the squared 2-norm of array arr(0:tsize-1)
     INPUT:
@@ -343,34 +354,33 @@ void gpu_array_norm2__(size_t tsize, const T *__restrict__ arr,
   auto thread_norms2 = (double *)
       local_ptr; // size = blockDim.x*sizeof(double) Bytes per thread block
 
-  n = item_ct.get_global_range(2);
+  n = item.get_global_range(0);
   _thread_norm2 = 0.0;
-  for (i = item_ct.get_global_id(2) i < tsize; i += n)
+  for (i = item.get_global_id(0) i < tsize; i += n)
     _thread_norm2 += arr[i] * arr[i];
-  thread_norms2[item_ct.get_local_id(2)] = _thread_norm2;
-  item_ct.barrier();
-  if (item_ct.get_local_id(2) == 0) { // global reduction among thread blocks
+  thread_norms2[item.get_local_id(0)] = _thread_norm2;
+  item.barrier(cl::sycl::access::fence_space::local_space);
+  if (item.get_local_id(0) == 0) { // global reduction among thread blocks
     _thread_norm2 = thread_norms2[0];
-    for (i = 1; i < item_ct.get_local_range().get(2); i++)
+    for (i = 1; i < item.get_local_range(0); i++)
       _thread_norm2 += thread_norms2[i];
     i = 1;
+
+    auto atm = atomic_ref<int>(norm2_wr_lock);
+
     while (i == 1) {
-      i = sycl::atomic<int>(sycl::global_ptr<int>(norm2_wr_lock)).fetch_max(1);
+      i = atm.fetch_max(1);
     } // waiting for the lock to unlock, then lock
-    /*
-      DPCT1007:1: Migration of this CUDA API is not supported by the Intel(R)
-      DPC++ Compatibility Tool.
-    */
-    __threadfence();
+
+    cl::sycl::ONEAPI::atomic_fence(cl::sycl::ONEAPI::memory_order::relaxed,
+                                   cl::sycl::ONEAPI::memory_scope::work_group);
     *bnorm2 += _thread_norm2;
-    /*
-      DPCT1007:2: Migration of this CUDA API is not supported by the Intel(R)
-      DPC++ Compatibility Tool.
-    */
-    __threadfence();
-    i = dpct::atomic_exchange(norm2_wr_lock, 0); // unlock
+
+    cl::sycl::ONEAPI::atomic_fence(cl::sycl::ONEAPI::memory_order::relaxed,
+                                   cl::sycl::ONEAPI::memory_scope::work_group);
+    i = atm.exchange(0); // unlock
   }
-  item_ct.barrier();
+  item.barrier(cl::sycl::access::fence_space::local_space);
   return;
 }
 // COMPLEX4:
@@ -378,8 +388,8 @@ template <>
 void gpu_array_norm2__<talshComplex4>(size_t tsize,
                                       const talshComplex4 *__restrict__ arr,
                                       volatile double *bnorm2,
-                                      sycl::nd_item<3> item_ct,
-                                      uint8_t *local_ptr, int *norm2_wr_lock)
+                                      cl::sycl::nd_item<1>& item, uint8_t *local_ptr,
+                                      int *norm2_wr_lock)
 /** Computes the squared 2-norm of array arr(0:tsize-1)
     INPUT:
     # tsize - size of the array;
@@ -394,35 +404,29 @@ void gpu_array_norm2__<talshComplex4>(size_t tsize,
   auto thread_norms2 = (double *)
       local_ptr; // size = blockDim.x*sizeof(double) Bytes per thread block
 
-  n = item_ct.get_global_range(2);
+  n = item.get_global_range(0);
   _thread_norm2 = 0.0;
-  for (i = item_ct.get_global_id(2) i < tsize; i += n)
+  for (i = item.get_global_id(0) i < tsize; i += n)
     _thread_norm2 += talshComplex4Asq(arr[i]);
-  thread_norms2[item_ct.get_local_id(2)] = _thread_norm2;
-  item_ct.barrier();
-  if (item_ct.get_local_id(2) ==
+  thread_norms2[item.get_local_id(0)] = _thread_norm2;
+  item.barrier(cl::sycl::access::fence_space::local_space);
+  if (item.get_local_id(0) ==
       0) { // global reduction among thread blocks (one thread per block)
     _thread_norm2 = thread_norms2[0];
-    for (i = 1; i < item_ct.get_local_range().get(2); i++)
+    for (i = 1; i < item.get_local_range().get(0); i++)
       _thread_norm2 += thread_norms2[i];
     i = 1;
+    auto atm = atomic_ref<int>(norm2_wr_lock);
     while (i == 1) {
-      i = sycl::atomic<int>(sycl::global_ptr<int>(norm2_wr_lock)).fetch_max(1);
+      i = atm.fetch_max(1);
     } // waiting for the lock to unlock, then lock
-    /*
-      DPCT1007:3: Migration of this CUDA API is not supported by the Intel(R)
-      DPC++ Compatibility Tool.
-    */
-    __threadfence();
+
+    cl::sycl::ONEAPI::atomic_fence(cl::sycl::ONEAPI::memory_order::relaxed, cl::sycl::ONEAPI::memory_scope::work_group);
     *bnorm2 += _thread_norm2;
-    /*
-      DPCT1007:4: Migration of this CUDA API is not supported by the Intel(R)
-      DPC++ Compatibility Tool.
-    */
-    __threadfence();
-    i = dpct::atomic_exchange(norm2_wr_lock, 0); // unlock
+    cl::sycl::ONEAPI::atomic_fence(cl::sycl::ONEAPI::memory_order::relaxed, cl::sycl::ONEAPI::memory_scope::work_group);
+    i = atm.exchange(0) // unlock
   }
-  item_ct.barrier();
+  item.barrier(cl::sycl::access::fence_space::local_space);
   return;
 }
 // COMPLEX8:
@@ -430,8 +434,8 @@ template <>
 void gpu_array_norm2__<talshComplex8>(size_t tsize,
                                       const talshComplex8 *__restrict__ arr,
                                       volatile double *bnorm2,
-                                      sycl::nd_item<3> item_ct,
-                                      uint8_t *local_ptr, int *norm2_wr_lock)
+                                      cl::sycl::nd_item<1>& item, uint8_t *local_ptr,
+                                      int *norm2_wr_lock)
 /** Computes the squared 2-norm of array arr(0:tsize-1)
     INPUT:
     # tsize - size of the array;
@@ -446,45 +450,39 @@ void gpu_array_norm2__<talshComplex8>(size_t tsize,
   auto thread_norms2 = (double *)
       local_ptr; // size = blockDim.x*sizeof(double) Bytes per thread block
 
-  n = item_ct.get_global_range(2);
+  n = item.get_global_range(0);
   _thread_norm2 = 0.0;
-  for (i = item_ct.get_global_id(2) i < tsize; i += n)
+  for (i = item.get_global_id(0) i < tsize; i += n)
     _thread_norm2 += talshComplex8Asq(arr[i]);
-  thread_norms2[item_ct.get_local_id(2)] = _thread_norm2;
-  item_ct.barrier();
-  if (item_ct.get_local_id(2) ==
+  thread_norms2[item.get_local_id(0)] = _thread_norm2;
+  item.barrier(cl::sycl::access::fence_space::local_space);
+  if (item.get_local_id(0) ==
       0) { // global reduction among thread blocks (one thread per block)
     _thread_norm2 = thread_norms2[0];
-    for (i = 1; i < item_ct.get_local_range().get(2); i++)
+    for (i = 1; i < item.get_local_range().get(0); i++)
       _thread_norm2 += thread_norms2[i];
     i = 1;
+    auto atm = atomic_ref<int>(norm2_wr_lock);
     while (i == 1) {
-      i = sycl::atomic<int>(sycl::global_ptr<int>(norm2_wr_lock)).fetch_max(1);
+      i = atm.fetch_max(1);
     } // waiting for the lock to unlock, then lock
-    /*
-      DPCT1007:5: Migration of this CUDA API is not supported by the Intel(R)
-      DPC++ Compatibility Tool.
-    */
-    __threadfence();
+
+    cl::sycl::ONEAPI::atomic_fence(cl::sycl::ONEAPI::memory_order::relaxed, cl::sycl::ONEAPI::memory_scope::work_group);
     *bnorm2 += _thread_norm2;
-    /*
-      DPCT1007:6: Migration of this CUDA API is not supported by the Intel(R)
-      DPC++ Compatibility Tool.
-    */
-    __threadfence();
-    i = dpct::atomic_exchange(norm2_wr_lock, 0); // unlock
+    cl::sycl::ONEAPI::atomic_fence(cl::sycl::ONEAPI::memory_order::relaxed, cl::sycl::ONEAPI::memory_scope::work_group);
+    i = atm.exchange(0) // unlock
   }
-  item_ct.barrier();
+  item.barrier(cl::sycl::access::fence_space::local_space);
   return;
 }
 //------------------------------------------------------------
 // ARRAY INITIALIZATION:
 template <typename T>
-void gpu_array_init__(size_t tsize, T *arr, T val, sycl::nd_item<3> item_ct)
+void gpu_array_init__(size_t tsize, T *arr, T val, cl::sycl::nd_item<1> &item)
 /** arr(0:tsize-1)=val **/
 {
-  size_t _ti = item_ct.get_global_id(2) size_t _gd =
-      item_ct.get_global_range(2);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   for (size_t l = _ti; l < tsize; l += _gd)
     arr[l] = val;
   return;
@@ -567,11 +565,11 @@ void gpu_scalar_multiply__<talshComplex8>(const talshComplex8 *left_arg,
 // REAL:
 template <typename T>
 void gpu_array_scale__(size_t tsize, T *arr, T alpha,
-                       cl::sycl::nd_item<1> &item_ct)
+                       cl::sycl::nd_item<1> &item)
 /** arr(0:tsize-1)*=alpha **/
 {
-  size_t _ti = item_ct.get_global_id(0);
-  size_t _gd = item_ct.get_global_range(0);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   for (size_t l = _ti; l < tsize; l += _gd)
     arr[l] *= alpha;
   return;
@@ -580,11 +578,11 @@ void gpu_array_scale__(size_t tsize, T *arr, T alpha,
 template <>
 void gpu_array_scale__<talshComplex4>(size_t tsize, talshComplex4 *arr,
                                       talshComplex4 alpha,
-                                      cl::sycl::nd_item<1> &item_ct)
+                                      cl::sycl::nd_item<1> &item)
 /** arr(0:tsize-1)*=alpha **/
 {
-  size_t _ti = item_ct.get_global_id(0);
-  size_t _gd = item_ct.get_global_range(0);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   for (size_t l = _ti; l < tsize; l += _gd)
     arr[l] = talshComplex4Mul(arr[l], alpha);
   return;
@@ -593,11 +591,11 @@ void gpu_array_scale__<talshComplex4>(size_t tsize, talshComplex4 *arr,
 template <>
 void gpu_array_scale__<talshComplex8>(size_t tsize, talshComplex8 *arr,
                                       talshComplex8 alpha,
-                                      cl::sycl::nd_item<1> &item_ct)
+                                      cl::sycl::nd_item<1> &item)
 /** arr(0:tsize-1)*=alpha **/
 {
-  size_t _ti = item_ct.get_global_id(0);
-  size_t _gd = item_ct.get_global_range(0);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   for (size_t l = _ti; l < tsize; l += _gd)
     arr[l] = talshComplex8Mul(arr[l], alpha);
   return;
@@ -608,11 +606,11 @@ void gpu_array_scale__<talshComplex8>(size_t tsize, talshComplex8 *arr,
 template <typename T>
 void gpu_array_add__(size_t tsize, T *__restrict__ arr0,
                      const T *__restrict__ arr1, T alpha,
-                     cl::sycl::nd_item<1> &item_ct, int left_conj)
+                     cl::sycl::nd_item<1> &item, int left_conj)
 /** arr0(0:tsize-1)+=arr1(0:tsize-1)*alpha **/
 {
-  size_t _ti = item_ct.get_global_id(0) size_t _gd =
-      item_ct.get_global_range(0);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   for (size_t l = _ti; l < tsize; l += _gd)
     arr0[l] += (arr1[l] * alpha);
   return;
@@ -623,12 +621,11 @@ void gpu_array_add__<talshComplex4>(size_t tsize,
                                     talshComplex4 *__restrict__ arr0,
                                     const talshComplex4 *__restrict__ arr1,
                                     talshComplex4 alpha,
-                                    cl::sycl::nd_item<1> &item_ct,
-                                    int left_conj)
+                                    cl::sycl::nd_item<1> &item, int left_conj)
 /** arr0(0:tsize-1)+=arr1(0:tsize-1)*alpha **/
 {
-  size_t _ti = item_ct.get_global_id(0) size_t _gd =
-      item_ct.get_global_range(0);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   if (left_conj != 0) {
     for (size_t l = _ti; l < tsize; l += _gd)
       arr0[l] = talshComplex4Add(
@@ -645,12 +642,11 @@ void gpu_array_add__<talshComplex8>(size_t tsize,
                                     talshComplex8 *__restrict__ arr0,
                                     const talshComplex8 *__restrict__ arr1,
                                     talshComplex8 alpha,
-                                    cl::sycl::nd_item<1> &item_ct,
-                                    int left_conj)
+                                    cl::sycl::nd_item<1> &item, int left_conj)
 /** arr0(0:tsize-1)+=arr1(0:tsize-1)*alpha **/
 {
-  size_t _ti = item_ct.get_global_id(0) size_t _gd =
-      item_ct.get_global_range(0);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   if (left_conj != 0) {
     for (size_t l = _ti; l < tsize; l += _gd)
       arr0[l] = talshComplex8Add(arr0[l], talshComplex8Mul(talshComplex8Conjg(arr1[l]), alpha));
@@ -666,11 +662,11 @@ void gpu_array_add__<talshComplex8>(size_t tsize,
 template <typename T>
 void gpu_array_add__(size_t tsize, T *__restrict__ arr0,
                      const T *__restrict__ arr1, const T *__restrict__ scalar,
-                     T alpha, cl::sycl::nd_item<1> &item_ct, int left_conj)
+                     T alpha, cl::sycl::nd_item<1> &item, int left_conj)
 /** arr0(0:tsize-1)+=arr1(0:tsize-1)*scalar*alpha **/
 {
-  size_t _ti = item_ct.get_global_id(0);
-  size_t _gd = item_ct.get_global_range(0);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   T pref = (*scalar) * alpha;
   for (size_t l = _ti; l < tsize; l += _gd)
     arr0[l] += (arr1[l] * pref);
@@ -683,12 +679,11 @@ void gpu_array_add__<talshComplex4>(size_t tsize,
                                     const talshComplex4 *__restrict__ arr1,
                                     const talshComplex4 *__restrict__ scalar,
                                     talshComplex4 alpha,
-                                    cl::sycl::nd_item<1> &item_ct,
-                                    int left_conj)
+                                    cl::sycl::nd_item<1> &item, int left_conj)
 /** arr0(0:tsize-1)+=arr1(0:tsize-1)*scalar*alpha **/
 {
-  size_t _ti = item_ct.get_global_id(0);
-  size_t _gd = item_ct.get_global_range(0);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   talshComplex4 pref = talshComplex4Mul(*scalar, alpha);
   if (left_conj != 0) {
     for (size_t l = _ti; l < tsize; l += _gd)
@@ -706,12 +701,11 @@ void gpu_array_add__<talshComplex8>(size_t tsize,
                                     const talshComplex8 *__restrict__ arr1,
                                     const talshComplex8 *__restrict__ scalar,
                                     talshComplex8 alpha,
-                                    cl::sycl::nd_item<1> &item_ct,
-                                    int left_conj)
+                                    cl::sycl::nd_item<1> &item, int left_conj)
 /** arr0(0:tsize-1)+=arr1(0:tsize-1)*scalar*alpha **/
 {
-  size_t _ti = item_ct.get_global_id(0);
-  size_t _gd = item_ct.get_global_range(0);
+  size_t _ti = item.get_global_id(0);
+  size_t _gd = item.get_global_range(0);
   talshComplex8 pref = talshComplex8Mul(*scalar, alpha);
   if (left_conj != 0) {
     for (size_t l = _ti; l < tsize; l += _gd)
@@ -728,7 +722,7 @@ void gpu_array_add__<talshComplex8>(size_t tsize,
 template <typename T>
 void gpu_array_dot_product__(size_t tsize, const T *arr1, const T *arr2,
                              volatile T *dprod, T alpha,
-                             cl::sycl::nd_item<3> &item_ct, uint8_t *local_ptr,
+                             cl::sycl::nd_item<1> &item, uint8_t *local_ptr,
                              int *dot_product_wr_lock, int left_conj,
                              int right_conj)
 /** Scalar (GPU) += arr1(0:tsize-1) * arr2(0:tsize-1) * alpha **/
@@ -739,34 +733,35 @@ void gpu_array_dot_product__(size_t tsize, const T *arr1, const T *arr2,
   size_t l;
   unsigned int j, s;
   int i;
-  size_t threadIdx_x = item_ct.get_local_id(2);
+  size_t threadIdx_x = item.get_local_id(0);
 
   dprs = (T *)(&sh_buf[0]); // dynamic shared memory buffer
   dpr = static_cast<T>(0.0);
-  for (l = item_ct.get_global_id(2); l < tsize;
-       l += item_ct.get_global_range(2))
+  for (l = item.get_global_id(0); l < tsize; l += item.get_global_range(0))
     dpr += arr1[l] * arr2[l];
   dprs[threadIdx_x] = dpr * alpha;
-  item_ct.barrier();
-  s = item_ct.get_local_range(2);
+  item.barrier(cl::sycl::access::fence_space::local_space);
+  s = item.get_local_range(0);
   while (s > 1) {
     j = (s + 1U) >> 1;
     if (threadIdx_x + j < s)
       dprs[threadIdx_x] += dprs[threadIdx_x + j];
-    item_ct.barrier();
+    item.barrier(cl::sycl::access::fence_space::local_space);
     s = j;
   }
   if (threadIdx_x == 0) {
     i = 1;
+    auto atm = atomic_ref<int>(dot_product_wr_lock);
     while (i != 0) {
-      i = cl::sycl::atomic<int>(cl::sycl::global_ptr<int>(dot_product_wr_lock)).fetch_max(1);
+      i = atm.fetch_max(1);
       if (i == 0)
         *dprod += dprs[0];
     }
-    item_ct.mem_fence();
-    i = cl::sycl::atomic<int>(cl::sycl::global_ptr<int>(dot_product_wr_lock)).exchange(0); // unlock
+    cl::sycl::ONEAPI::atomic_fence(cl::sycl::ONEAPI::memory_order::relaxed,
+                                   cl::sycl::ONEAPI::memory_scope::work_group);
+    i = atm.exchange(0); // unlock
   }
-  item_ct.barrier();
+  item.barrier(cl::sycl::access::fence_space::local_space);
   return;
 }
 // COMPLEX4:
@@ -774,7 +769,7 @@ template <>
 void gpu_array_dot_product__<talshComplex4>(
     size_t tsize, const talshComplex4 *arr1, const talshComplex4 *arr2,
     volatile talshComplex4 *dprod, talshComplex4 alpha,
-    cl::sycl::nd_item<3> &item_ct, uint8_t *local_ptr, int *dot_product_wr_lock,
+    cl::sycl::nd_item<1> &item, uint8_t *local_ptr, int *dot_product_wr_lock,
     int left_conj, int right_conj)
 /** Scalar (GPU) += arr1(0:tsize-1) * arr2(0:tsize-1) * alpha **/
 {
@@ -784,54 +779,62 @@ void gpu_array_dot_product__<talshComplex4>(
   size_t l;
   unsigned int j, s;
   int i;
-  size_t threadIdx_x = item_ct.get_local_id(2);
+  size_t threadIdx_x = item.get_local_id(0);
+  size_t globalIdx_x = item.get_global_id(0);
+  size_t globalDim_x = item.get_global_range(0);
 
   dprs = (talshComplex4 *)(&sh_buf[0]); // dynamic shared memory buffer
   dpr = talshComplex4Set(0.0f, 0.0f);
   if (left_conj != 0) {
     if (right_conj != 0) {
-      for (l = item_ct.get_global_id(2); l < tsize; l += item_ct.get_global_range(2)) {
+      for (l = globalIdx_x; l < tsize;
+           l += globalDim_x) {
         dpr = talshComplex4Add(dpr, talshComplex4Mul(talshComplex4Conjg(arr1[l]), talshComplex4Conjg(arr2[l])));
       }
     } else {
-      for (l = item_ct.get_global_id(2); l < tsize; l += item_ct.get_global_range(2)) {
+      for (l = globalIdx_x; l < tsize;
+           l += globalDim_x) {
         dpr = talshComplex4Add(dpr, talshComplex4Mul(talshComplex4Conjg(arr1[l]), arr2[l]));
       }
     }
   } else {
     if (right_conj != 0) {
-      for (l = item_ct.get_global_id(2); l < tsize; l += item_ct.get_global_range(2)) {
+      for (l = globalIdx_x; l < tsize;
+           l += globalDim_x) {
         dpr = talshComplex4Add(dpr, talshComplex4Mul(arr1[l], talshComplex4Conjg(arr2[l])));
       }
     } else {
-      for (l = item_ct.get_global_id(2); l < tsize; l += item_ct.get_global_range(2)) {
+      for (l = globalIdx_x; l < tsize;
+           l += globalDim_x) {
         dpr = talshComplex4Add(dpr, talshComplex4Mul(arr1[l], arr2[l]));
       }
     }
   }
   dprs[threadIdx_x] = talshComplex4Mul(dpr, alpha);
-  item_ct.barrier();
-  s = item_ct.get_local_range(2);
+  item.barrier(cl::sycl::access::fence_space::local_space);
+  s = item.get_local_range(0);
   while (s > 1) {
     j = (s + 1U) >> 1;
     if (threadIdx_x + j < s)
       dprs[threadIdx_x] = talshComplex4Add(dprs[threadIdx_x], dprs[threadIdx_x + j]);
-    item_ct.barrier();
+    item.barrier(cl::sycl::access::fence_space::local_space);
     s = j;
   }
   if (threadIdx_x == 0) {
     i = 1;
+    auto atm = atomic_ref<int>(dot_product_wr_lock);
     while (i != 0) {
-      i = cl::sycl::atomic<int>(cl::sycl::global_ptr<int>(dot_product_wr_lock)).fetch_max(1);
+      i = atm.fetch_max(1);
       if (i == 0) {
         dprod->x += talshComplex4Real(dprs[0]);
         dprod->y += talshComplex4Imag(dprs[0]);
       }
     }
-    item_ct.mem_fence();
-    i = cl::sycl::atomic<int>(cl::sycl::global_ptr<int>(dot_product_wr_lock)).exchange(0); // unlock
+    cl::sycl::ONEAPI::atomic_fence(cl::sycl::ONEAPI::memory_order::relaxed,
+                                   cl::sycl::ONEAPI::memory_scope::work_group);
+    i = atm.exchange(0); // unlock
   }
-  item_ct.barrier();
+  item.barrier(cl::sycl::access::fence_space::local_space);
   return;
 }
 // COMPLEX8:
@@ -839,7 +842,7 @@ template <>
 void gpu_array_dot_product__<talshComplex8>(
     size_t tsize, const talshComplex8 *arr1, const talshComplex8 *arr2,
     volatile talshComplex8 *dprod, talshComplex8 alpha,
-    cl::sycl::nd_item<3> &item_ct, uint8_t *local_ptr, int *dot_product_wr_lock,
+    cl::sycl::nd_item<3> &item, uint8_t *local_ptr, int *dot_product_wr_lock,
     int left_conj, int right_conj)
 /** Scalar (GPU) += arr1(0:tsize-1) * arr2(0:tsize-1) * alpha **/
 {
@@ -849,54 +852,62 @@ void gpu_array_dot_product__<talshComplex8>(
   size_t l;
   unsigned int j, s;
   int i;
-  size_t threadIdx_x = item_ct.get_local_id(2);
+  size_t threadIdx_x = item.get_local_id(0);
+  size_t globalIdx_x = item.get_global_id(0);
+  size_t globalDim_x = item.get_global_range(0);
 
   dprs = (talshComplex8 *)(&sh_buf[0]); // dynamic shared memory buffer
   dpr = talshComplex8Set(0.0, 0.0);
   if (left_conj != 0) {
     if (right_conj != 0) {
-      for (l = item_ct.get_global_id(2); l < tsize; l += item_ct.get_global_range(2)) {
+      for (l = globalIdx_x; l < tsize;
+           l += globalDim_x) {
         dpr = talshComplex8Add(dpr, talshComplex8Mul(talshComplex8Conjg(arr1[l]), talshComplex8Conjg(arr2[l])));
       }
     } else {
-      for (l = item_ct.get_global_id(2); l < tsize; l += item_ct.get_global_range(2)) {
+      for (l = globalIdx_x; l < tsize;
+           l += globalDim_x) {
         dpr = talshComplex8Add(dpr, talshComplex8Mul(talshComplex8Conjg(arr1[l]), arr2[l]));
       }
     }
   } else {
     if (right_conj != 0) {
-      for (l = item_ct.get_global_id(2); l < tsize; l += item_ct.get_global_range(2)) {
+      for (l = globalIdx_x; l < tsize;
+           l += globalDim_x) {
         dpr = talshComplex8Add(dpr, talshComplex8Mul(arr1[l], talshComplex8Conjg(arr2[l])));
       }
     } else {
-      for (l = item_ct.get_global_id(2); l < tsize; l += item_ct.get_global_range(2)) {
+      for (l = globalIdx_x; l < tsize;
+           l += globalDim_x) {
         dpr = talshComplex8Add(dpr, talshComplex8Mul(arr1[l], arr2[l]));
       }
     }
   }
   dprs[threadIdx_x] = talshComplex8Mul(dpr, alpha);
-  item_ct.barrier();
-  s = item_ct.get_local_range().get(2);
+  item.barrier(cl::sycl::access::fence_space::local_space);
+  s = item.get_local_range(0);
   while (s > 1) {
     j = (s + 1U) >> 1;
     if (threadIdx_x + j < s)
       dprs[threadIdx_x] = talshComplex8Add(dprs[threadIdx_x], dprs[threadIdx_x + j]);
-    item_ct.barrier();
+    item.barrier(cl::sycl::access::fence_space::local_space);
     s = j;
   }
   if (threadIdx_x == 0) {
     i = 1;
+    auto atm = atomic_ref<int>(dot_product_wr_lock);
     while (i != 0) {
-      i = cl::sycl::atomic<int>(cl::sycl::global_ptr<int>(dot_product_wr_lock)).fetch_max(1);
+      i = atm.fetch_max(1);
       if (i == 0) {
         dprod->x += talshComplex8Real(dprs[0]);
         dprod->y += talshComplex8Imag(dprs[0]);
       }
     }
-    item_ct.mem_fence();
-    i = cl::sycl::atomic<int>(cl::sycl::global_ptr<int>(dot_product_wr_lock)).exchange(0); // unlock
+    cl::sycl::ONEAPI::atomic_fence(cl::sycl::ONEAPI::memory_order::relaxed,
+                                   cl::sycl::ONEAPI::memory_scope::work_group);
+    i = atm.exchange(0); // unlock
   }
-  item_ct.barrier();
+  item.barrier(cl::sycl::access::fence_space::local_space);
   return;
 }
 //---------------------------------------------------------------------------------------------------------
@@ -905,7 +916,7 @@ void gpu_array_dot_product__<talshComplex8>(
 template <typename T>
 void gpu_array_product__(size_t tsize1, const T *arr1, size_t tsize2,
                          const T *arr2, T *arr0, T alpha,
-                         cl::sycl::nd_item<3> &item_ct, T *lbuf, T *rbuf,
+                         cl::sycl::nd_item<2> &item, T *lbuf, T *rbuf,
                          talshComplex4 *lbuf, talshComplex4 *rbuf,
                          talshComplex8 *lbuf, talshComplex8 *rbuf,
                          int left_conj, int right_conj)
@@ -913,9 +924,9 @@ void gpu_array_product__(size_t tsize1, const T *arr1, size_t tsize2,
 {
   size_t _ib, _in, _jb, _jn, _tx, _jc;
 
-  _tx = (size_t)item_ct.get_local_id(2);
-  for (_jb = item_ct.get_group(1) * THRDS_ARRAY_PRODUCT; _jb < tsize2;
-       _jb += item_ct.get_group_range(1) * THRDS_ARRAY_PRODUCT) {
+  _tx = (size_t)item.get_local_id(1);
+  for (_jb = item.get_group(0) * THRDS_ARRAY_PRODUCT; _jb < tsize2;
+       _jb += item.get_group_range(0) * THRDS_ARRAY_PRODUCT) {
     if (_jb + THRDS_ARRAY_PRODUCT > tsize2) {
       _jn = tsize2 - _jb;
     } else {
@@ -923,8 +934,8 @@ void gpu_array_product__(size_t tsize1, const T *arr1, size_t tsize2,
     }
     if (_tx < _jn)
       rbuf[_tx] = arr2[_jb + _tx] * alpha;
-    for (_ib = item_ct.get_group(2) * THRDS_ARRAY_PRODUCT; _ib < tsize1;
-         _ib += item_ct.get_group_range(2) * THRDS_ARRAY_PRODUCT) {
+    for (_ib = item.get_group(1) * THRDS_ARRAY_PRODUCT; _ib < tsize1;
+         _ib += item.get_group_range(1) * THRDS_ARRAY_PRODUCT) {
       if (_ib + THRDS_ARRAY_PRODUCT > tsize1) {
         _in = tsize1 - _ib;
       } else {
@@ -932,12 +943,12 @@ void gpu_array_product__(size_t tsize1, const T *arr1, size_t tsize2,
       }
       if (_tx < _in)
         lbuf[_tx] = arr1[_ib + _tx];
-      item_ct.barrier();
+      item.barrier(cl::sycl::access::fence_space::local_space);
       for (_jc = 0; _jc < _jn; _jc++) {
         if (_tx < _in)
           arr0[(_jb + _jc) * tsize1 + _ib + _tx] += lbuf[_tx] * rbuf[_jc];
       }
-      item_ct.barrier();
+      item.barrier(cl::sycl::access::fence_space::local_space);
     }
   }
   return;
@@ -947,16 +958,16 @@ template <>
 void gpu_array_product__<talshComplex4>(
     size_t tsize1, const talshComplex4 *arr1, size_t tsize2,
     const talshComplex4 *arr2, talshComplex4 *arr0, talshComplex4 alpha,
-    cl::sycl::nd_item<3> &item_ct, T *lbuf, T *rbuf, talshComplex4 *lbuf,
+    cl::sycl::nd_item<2> &item, T *lbuf, T *rbuf, talshComplex4 *lbuf,
     talshComplex4 *rbuf, talshComplex8 *lbuf, talshComplex8 *rbuf,
     int left_conj, int right_conj)
 /** arr0[0:tsize2-1][0:tsize1-1]+=arr1[0:tsize1-1]*arr2[0:tsize2-1]*alpha **/
 {
   size_t _ib, _in, _jb, _jn, _tx, _jc, _ja;
 
-  _tx = (size_t)item_ct.get_local_id(2);
-  for (_jb = item_ct.get_group(1) * THRDS_ARRAY_PRODUCT; _jb < tsize2;
-       _jb += item_ct.get_group_range(1) * THRDS_ARRAY_PRODUCT) {
+  _tx = (size_t)item.get_local_id(1);
+  for (_jb = item.get_group(0) * THRDS_ARRAY_PRODUCT; _jb < tsize2;
+       _jb += item.get_group_range(0) * THRDS_ARRAY_PRODUCT) {
     if (_jb + THRDS_ARRAY_PRODUCT > tsize2) {
       _jn = tsize2 - _jb;
     } else {
@@ -970,8 +981,8 @@ void gpu_array_product__<talshComplex4>(
       if (_tx < _jn)
         rbuf[_tx] = talshComplex4Mul(arr2[_jb + _tx], alpha);
     }
-    for (_ib = item_ct.get_group(2) * THRDS_ARRAY_PRODUCT; _ib < tsize1;
-         _ib += item_ct.get_group_range(2) * THRDS_ARRAY_PRODUCT) {
+    for (_ib = item.get_group(1) * THRDS_ARRAY_PRODUCT; _ib < tsize1;
+         _ib += item.get_group_range(1) * THRDS_ARRAY_PRODUCT) {
       if (_ib + THRDS_ARRAY_PRODUCT > tsize1) {
         _in = tsize1 - _ib;
       } else {
@@ -984,7 +995,7 @@ void gpu_array_product__<talshComplex4>(
         if (_tx < _in)
           lbuf[_tx] = arr1[_ib + _tx];
       }
-      item_ct.barrier();
+      item.barrier(cl::sycl::access::fence_space::local_space);
       for (_jc = 0; _jc < _jn; _jc++) {
         if (_tx < _in) {
           _ja = (_jb + _jc) * tsize1 + (_ib + _tx);
@@ -992,7 +1003,7 @@ void gpu_array_product__<talshComplex4>(
                                        talshComplex4Mul(lbuf[_tx], rbuf[_jc]));
         }
       }
-      item_ct.barrier();
+      item.barrier(cl::sycl::access::fence_space::local_space);
     }
   }
   return;
@@ -1002,16 +1013,16 @@ template <>
 void gpu_array_product__<talshComplex8>(
     size_t tsize1, const talshComplex8 *arr1, size_t tsize2,
     const talshComplex8 *arr2, talshComplex8 *arr0, talshComplex8 alpha,
-    cl::sycl::nd_item<3> &item_ct, T *lbuf, T *rbuf, talshComplex4 *lbuf,
+    cl::sycl::nd_item<2> &item, T *lbuf, T *rbuf, talshComplex4 *lbuf,
     talshComplex4 *rbuf, talshComplex8 *lbuf, talshComplex8 *rbuf,
     int left_conj, int right_conj)
 /** arr0[0:tsize2-1][0:tsize1-1]+=arr1[0:tsize1-1]*arr2[0:tsize2-1]*alpha **/
 {
   size_t _ib, _in, _jb, _jn, _tx, _jc, _ja;
 
-  _tx = (size_t)item_ct.get_local_id(2);
-  for (_jb = item_ct.get_group(1) * THRDS_ARRAY_PRODUCT; _jb < tsize2;
-       _jb += item_ct.get_group_range(1) * THRDS_ARRAY_PRODUCT) {
+  _tx = (size_t)item.get_local_id(1);
+  for (_jb = item.get_group(0) * THRDS_ARRAY_PRODUCT; _jb < tsize2;
+       _jb += item.get_group_range(0) * THRDS_ARRAY_PRODUCT) {
     if (_jb + THRDS_ARRAY_PRODUCT > tsize2) {
       _jn = tsize2 - _jb;
     } else {
@@ -1025,8 +1036,8 @@ void gpu_array_product__<talshComplex8>(
       if (_tx < _jn)
         rbuf[_tx] = talshComplex8Mul(arr2[_jb + _tx], alpha);
     }
-    for (_ib = item_ct.get_group(2) * THRDS_ARRAY_PRODUCT; _ib < tsize1;
-         _ib += item_ct.get_group_range(2) * THRDS_ARRAY_PRODUCT) {
+    for (_ib = item.get_group(1) * THRDS_ARRAY_PRODUCT; _ib < tsize1;
+         _ib += item.get_group_range(1) * THRDS_ARRAY_PRODUCT) {
       if (_ib + THRDS_ARRAY_PRODUCT > tsize1) {
         _in = tsize1 - _ib;
       } else {
@@ -1039,7 +1050,7 @@ void gpu_array_product__<talshComplex8>(
         if (_tx < _in)
           lbuf[_tx] = arr1[_ib + _tx];
       }
-      item_ct.barrier();
+      item.barrier(cl::sycl::access::fence_space::local_space);
       for (_jc = 0; _jc < _jn; _jc++) {
         if (_tx < _in) {
           _ja = (_jb + _jc) * tsize1 + (_ib + _tx);
@@ -1047,7 +1058,7 @@ void gpu_array_product__<talshComplex8>(
                                        talshComplex8Mul(lbuf[_tx], rbuf[_jc]));
         }
       }
-      item_ct.barrier();
+      item.barrier(cl::sycl::access::fence_space::local_space);
     }
   }
   return;
@@ -1055,10 +1066,23 @@ void gpu_array_product__<talshComplex8>(
 //---------------------------------------------------------------------------------------------------
 // TENSOR TRANSPOSE-ADD (shared-memory version):
 template <typename T>
-void gpu_tensor_block_add_dlf__(int dmo, int drc, int dim_num,
-                                int const_args_pos,
-                                const T *__restrict__ tens_in,
-                                T *__restrict__ tens_out)
+void gpu_tensor_block_add_dlf__(
+    int dmo, int drc, int dim_num, int const_args_pos,
+    const T *__restrict__ tens_in, T *__restrict__ tens_out,
+    cl::sycl::nd_item<3>& item,
+    dpct::accessor<int, dpct::device, 2>& const_args_dims,
+    dpct::accessor<int, dpct::device, 2>& const_args_prmn,
+    int *gpu_error_count,
+    T *buf0, float *val, size_t *base_in, size_t *base_out, size_t *ftb,
+    size_t *gtb, int *htb, int *stb, int *dim_in, int *dim_out, int *o2n,
+    int *n2o, int *pri, int *tmp0, int *err_code, int *minor, int *minor_in,
+    int *minor_out, int *s1_ind, int *s1_ond, int *s1_step, int *s1_dim,
+    int *s2_ind, int *s2_ond, int *s2_step, int *s2_dim, int *ns1, int *ns2,
+    size_t *vol, size_t *vol_ext)
+// void gpu_tensor_block_add_dlf__(int dmo, int drc, int dim_num,
+//                                 int const_args_pos,
+//                                 const T *__restrict__ tens_in,
+//                                 T *__restrict__ tens_out)
 /**
    Shared-memory version of tensor transpose-add: tens_out+=TRN(tens_in):
    INPUT:
@@ -1074,520 +1098,497 @@ execution configuration is <<<1,warpSize>>> # Number of threads per block must
 be multiple of the warpSize!
 **/
 {
-  // stream_id->submit([&](cl::sycl::handler &cgh)
-  // 		      {
+    local_accessor<T, 1> buf0_acc(TENS_TRANSP_BUF_SIZE, cgh);
+    local_accessor<float, 1> val_acc(1, cgh);
+    local_accessor<size_t, 1> base_in_acc(MAX_TENSOR_RANK, cgh);
+    local_accessor<size_t, 1> base_out_acc(MAX_TENSOR_RANK, cgh);
+    local_accessor<size_t, 1> ftb_acc(TENS_TRANSP_TAB_SIZE, cgh);
+    local_accessor<size_t, 1> gtb_acc(TENS_TRANSP_TAB_SIZE, cgh);
+    local_accessor<int, 1> htb_acc(TENS_TRANSP_TAB_SIZE, cgh);
+    local_accessor<int, 1> stb_acc(TENS_TRANSP_TAB_SIZE, cgh);
+    local_accessor<size_t, 1> ftb_acc(TENS_TRANSP_TAB_SIZE, cgh);
+    local_accessor<int, 1> dim_in_acc(MAX_TENSOR_RANK, cgh);
+    local_accessor<int, 1> dim_out_acc(MAX_TENSOR_RANK, cgh);
+    local_accessor<int, 1> o2n_acc(MAX_TENSOR_RANK, cgh);
+    local_accessor<int, 1> pri_acc(MAX_TENSOR_RANK, cgh);
+    local_accessor<int, 1> tmp0_acc(MAX_TENSOR_RANK, cgh);
+    local_accessor<int, 1> err_code_acc(1, cgh);
+    local_accessor<int, 1> minor_acc(1, cgh);
+    local_accessor<int, 1> minor_in_acc(1, cgh);
+    local_accessor<int, 1> minor_out_acc(1, cgh);
+    local_accessor<size_t, 1> vol_acc(1, cgh);
+    local_accessor<size_t, 1> vol_ext_acc(1, cgh);
 
-  cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_acc(TENS_TRANSP_BUF_SIZE, cgh);
-  cl::sycl::accessor<float, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc(1, cgh);
-  cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc(MAX_TENSOR_RANK, cgh);
-  cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc(MAX_TENSOR_RANK, cgh);
-  cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc(TENS_TRANSP_TAB_SIZE, cgh);
-  cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc(TENS_TRANSP_TAB_SIZE, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc(TENS_TRANSP_TAB_SIZE, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc(TENS_TRANSP_TAB_SIZE, cgh);
-  cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc(TENS_TRANSP_TAB_SIZE, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc(MAX_TENSOR_RANK, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc(MAX_TENSOR_RANK, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc(MAX_TENSOR_RANK, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc(MAX_TENSOR_RANK, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc(MAX_TENSOR_RANK, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc(1, cgh);
-  cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc(1, cgh);
-  cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc(1, cgh);
-  cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc(1, cgh);
+    T *buf0 = buf0_acc.get_pointer();
+    float *val = val_acc.get_pointer();
+    size_t *base_in = base_in_acc.get_pointer();
+    size_t *base_out = base_out_acc.get_pointer();
+    size_t *ftb = ftb_acc.get_pointer();
+    size_t *gtb = gtb_acc.get_pointer();
+    int *htb = htb_acc.get_pointer();
+    int *stb = stb_acc.get_pointer();
+    int *dim_in = dim_in_acc.get_pointer();
+    int *dim_out = dim_out_acc.get_pointer();
+    int *o2n = o2n_acc.get_pointer();
+    int *n2o = n2o_acc.get_pointer();
+    int *pri = pri_acc.get_pointer();
+    int *tmp0 = tmp0_acc.get_pointer();
+    int *err_code = err_code_acc.get_pointer();
+    int *minor = minor_acc.get_pointer();
+    int *minor_in = minor_in_acc.get_pointer();
+    int *minor_out = minor_out_acc.get_pointer();
+    size_t *vol = vol_acc.get_pointer();
+    size_t *vol_ext = vol_ext_acc.get_pointer();
 
-  // dpct::accessor<int, dpct::device, 2> const_args_dims,
-  // 	dpct::accessor<int, dpct::device, 2> const_args_prmn,
-  // int *gpu_error_count;
-  T *buf0 = buf0_acc.get_pointer();
-  float *val = val_acc.get_pointer();
-  size_t *base_in = base_in_acc.get_pointer();
-  size_t *base_out = base_out_acc.get_pointer();
-  size_t *ftb = ftb_acc.get_pointer();
-  size_t *gtb = gtb_acc.get_pointer();
-  int *htb = htb_acc.get_pointer();
-  int *stb = stb_acc.get_pointer();
-  int *dim_in = dim_in_acc.get_pointer();
-  int *dim_out = dim_out_acc.get_pointer();
-  int *o2n = o2n_acc.get_pointer();
-  int *n2o = n2o_acc.get_pointer();
-  int *pri = pri_acc.get_pointer();
-  int *tmp0 = tmp0_acc.get_pointer();
-  int *err_code = err_code_acc.get_pointer();
-  int *minor = minor_acc.get_pointer();
-  int *minor_in = minor_in_acc.get_pointer();
-  int *minor_out = minor_out_acc.get_pointer();
-  int *s1_ind = s1_ind_acc.get_pointer();
-  int *s1_ond = s1_ond_acc.get_pointer();
-  int *s1_step = s1_step_acc.get_pointer();
-  int *s1_dim = s1_dim_acc.get_pointer();
-  int *s2_ind = s2_ind_acc.get_pointer();
-  int *s2_ond = s2_ond_acc.get_pointer();
-  int *s2_step = s2_step_acc.get_pointer();
-  int *s2_dim = s2_dim_acc.get_pointer();
-  int *ns1 = ns1_acc.get_pointer();
-  int *ns2 = ns2_acc.get_pointer();
-  size_t *vol = vol_acc.get_pointer();
-  size_t *vol_ext = vol_ext_acc.get_pointer();
+    size_t _vol, _addr_in, _addr_out, _addr, _work_piece;
+    int i, j, k, l, m, n, _vol_minor, _vol_in, _vol_out, _s1, _s2;
 
-  size_t _vol, _addr_in, _addr_out, _addr, _work_piece;
-  int i, j, k, l, m, n, _vol_minor, _vol_in, _vol_out, _s1, _s2;
+    /*
+      SHARED MEMORY USE (bytes) =
+      + TENS_TRANSP_BUF_SIZE*sizeof(T)
+      + MAX_TENSOR_RANK*(8+8+4+4+4+4+4+4)
+      + TENS_TRANSP_TAB_SIZE*(8+8+4+4)
+      + 4*15 + 8*2
+      MIN REGISTER USE (bytes) per thread =
+      + 4*4 + 4*11 + 8*5 = 100
+    */
 
-  /*
-    SHARED MEMORY USE (bytes) =
-    + TENS_TRANSP_BUF_SIZE*sizeof(T)
-    + MAX_TENSOR_RANK*(8+8+4+4+4+4+4+4)
-    + TENS_TRANSP_TAB_SIZE*(8+8+4+4)
-    + 4*15 + 8*2
-    MIN REGISTER USE (bytes) per thread =
-    + 4*4 + 4*11 + 8*5 = 100
-  */
+    size_t threadIdx_x = item.get_local_id(0);
+    size_t blockDim_x = item.get_local_range(0);
 
-  size_t threadIdx_x = item_ct.get_local_id(2);
-  size_t blockDim_x = item_ct.get_local_range(2);
-
-  // Determine the minor index set (only the master thread in each thread
-  // block):
-  if (threadIdx_x == 0) {
-    *err_code = 0;
-    if (dim_num >= 0 && dim_num <= MAX_TENSOR_RANK && blockDim_x >= warpSize &&
-        blockDim_x % warpSize == 0) {
-      *s1_ind = dim_num + 1;
-      *s2_ind = dim_num - 1;
-      _vol = 1;
-      for (i = 0; i < dim_num; i++) {
-        _vol *= const_args_dims[const_args_pos][i];
-        if (const_args_prmn[const_args_pos][i] != i + 1)
-          *s1_ind = 0;
-      }
-      *vol = _vol;        // total volume (number of tensor elements)
-      if (*s1_ind == 0) { // non-trivial permutation
-        // Set input/output permutations and dimension extents:
-        if (drc == 0) { // normal index permutation
-          for (i = 0; i < dim_num; i++)
-            o2n[i] = const_args_prmn[const_args_pos][i] - 1;
-          for (i = 0; i < dim_num; i++)
-            n2o[o2n[i]] = i;
-        } else { // inversed index permutation
-          for (i = 0; i < dim_num; i++)
-            n2o[i] = const_args_prmn[const_args_pos][i] - 1;
-          for (i = 0; i < dim_num; i++)
-            o2n[n2o[i]] = i;
+    // Determine the minor index set (only the master thread in each thread
+    // block):
+    if (threadIdx_x == 0) {
+      *err_code = 0;
+      if (dim_num >= 0 && dim_num <= MAX_TENSOR_RANK &&
+          blockDim_x >= warpSize && blockDim_x % warpSize == 0) {
+        *s1_ind = dim_num + 1;
+        *s2_ind = dim_num - 1;
+        _vol = 1;
+        for (i = 0; i < dim_num; i++) {
+          _vol *= const_args_dims[const_args_pos][i];
+          if (const_args_prmn[const_args_pos][i] != i + 1)
+            *s1_ind = 0;
         }
-        if (dmo == 0) { // normal dimension order
-          for (i = 0; i < dim_num; i++)
-            dim_in[i] = const_args_dims[const_args_pos][i];
-          for (i = 0; i < dim_num; i++)
-            dim_out[o2n[i]] = dim_in[i];
-        } else { // inversed dimension order
-          for (i = 0; i < dim_num; i++)
-            dim_out[i] = const_args_dims[const_args_pos][i];
-          for (i = 0; i < dim_num; i++)
-            dim_in[n2o[i]] = dim_out[i];
-        }
-        *s1_step = dim_in[(*s1_ind)];
-        *s2_step = dim_in[(*s2_ind)];
-        if (_vol > TENS_TRANSP_BUF_SIZE) { // tensor block does not fit into the
-                                           // shared memory buffer
-          // Determine the input/output minor index sets and the combined minor
-          // index set:
-          l = (int)(cl::sycl::sqrt((float)TENS_TRANSP_BUF_SIZE));
-          *minor_in = 0;
-          _vol_in = 1;
-          for (i = 0; i < dim_num; i++) {
-            j = _vol_in * dim_in[i];
-            if (j > l)
-              break;
-            (*minor_in)++;
-            _vol_in = j;
+        *vol = _vol;        // total volume (number of tensor elements)
+        if (*s1_ind == 0) { // non-trivial permutation
+          // Set input/output permutations and dimension extents:
+          if (drc == 0) { // normal index permutation
+            for (i = 0; i < dim_num; i++)
+              o2n[i] = const_args_prmn[const_args_pos][i] - 1;
+            for (i = 0; i < dim_num; i++)
+              n2o[o2n[i]] = i;
+          } else { // inversed index permutation
+            for (i = 0; i < dim_num; i++)
+              n2o[i] = const_args_prmn[const_args_pos][i] - 1;
+            for (i = 0; i < dim_num; i++)
+              o2n[n2o[i]] = i;
           }
-          *minor_out = 0;
-          _vol_out = 1;
-          for (i = 0; i < dim_num; i++) {
-            j = _vol_out * dim_out[i];
-            if (j > l)
-              break;
-            (*minor_out)++;
-            _vol_out = j;
+          if (dmo == 0) { // normal dimension order
+            for (i = 0; i < dim_num; i++)
+              dim_in[i] = const_args_dims[const_args_pos][i];
+            for (i = 0; i < dim_num; i++)
+              dim_out[o2n[i]] = dim_in[i];
+          } else { // inversed dimension order
+            for (i = 0; i < dim_num; i++)
+              dim_out[i] = const_args_dims[const_args_pos][i];
+            for (i = 0; i < dim_num; i++)
+              dim_in[n2o[i]] = dim_out[i];
           }
-          *minor = *minor_in;
-          _vol_minor = _vol_in;
-          for (i = 0; i < *minor_out; i++) {
-            if (n2o[i] >= *minor_in) {
-              (*minor)++;
-              _vol_minor *= dim_out[i];
-            }
-          }
-          m = 1;
-          _s1 = 0;
-          _s2 = 0;
-          while (_vol_minor < TENS_TRANSP_BUF_SIZE && m != 0) {
-            m = 0;
-            if (_s1 == 0) {
-              for (i = *minor_in; i < dim_num; i++) {
-                if (o2n[i] < *minor_out) {
-                  (*minor_in)++;
-                  _vol_in *= dim_in[i];
-                } else {
-                  break;
-                }
-              }
-            }
-            if (_s2 == 0) {
-              for (i = *minor_out; i < dim_num; i++) {
-                if (n2o[i] < *minor_in) {
-                  (*minor_out)++;
-                  _vol_out *= dim_out[i];
-                } else {
-                  break;
-                }
-              }
-            }
-            j = dim_in[(*minor_in)];
-            l = dim_out[(*minor_out)];
-            if (*minor_in == n2o[(*minor_out)] &&
-                _s1 + _s2 == 0) { // same candidate index to both the input and
-                                  // output index sets
-              if (j > 1 && TENS_TRANSP_BUF_SIZE < _vol_minor * 2)
+          *s1_step = dim_in[(*s1_ind)];
+          *s2_step = dim_in[(*s2_ind)];
+          if (_vol > TENS_TRANSP_BUF_SIZE) { // tensor block does not fit into
+                                             // the shared memory buffer
+            // Determine the input/output minor index sets and the combined
+            // minor index set:
+            l = (int)(cl::sycl::sqrt((float)TENS_TRANSP_BUF_SIZE));
+            *minor_in = 0;
+            _vol_in = 1;
+            for (i = 0; i < dim_num; i++) {
+              j = _vol_in * dim_in[i];
+              if (j > l)
                 break;
-              if (_vol_minor * j > TENS_TRANSP_BUF_SIZE) {
-                *s1_ind = *minor_in;
-                *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                _s1++;
-                _s2++;
-              }
               (*minor_in)++;
-              _vol_in *= j;
+              _vol_in = j;
+            }
+            *minor_out = 0;
+            _vol_out = 1;
+            for (i = 0; i < dim_num; i++) {
+              j = _vol_out * dim_out[i];
+              if (j > l)
+                break;
               (*minor_out)++;
-              _vol_out *= j;
-              (*minor)++;
-              _vol_minor *= j;
-              m++;
-            } else { // the input and output index sets consider two different
-                     // candidates
-              if (_vol_minor * j * l <= TENS_TRANSP_BUF_SIZE &&
-                  _s1 + _s2 == 0) { // accept both, no splitting
+              _vol_out = j;
+            }
+            *minor = *minor_in;
+            _vol_minor = _vol_in;
+            for (i = 0; i < *minor_out; i++) {
+              if (n2o[i] >= *minor_in) {
+                (*minor)++;
+                _vol_minor *= dim_out[i];
+              }
+            }
+            m = 1;
+            _s1 = 0;
+            _s2 = 0;
+            while (_vol_minor < TENS_TRANSP_BUF_SIZE && m != 0) {
+              m = 0;
+              if (_s1 == 0) {
+                for (i = *minor_in; i < dim_num; i++) {
+                  if (o2n[i] < *minor_out) {
+                    (*minor_in)++;
+                    _vol_in *= dim_in[i];
+                  } else {
+                    break;
+                  }
+                }
+              }
+              if (_s2 == 0) {
+                for (i = *minor_out; i < dim_num; i++) {
+                  if (n2o[i] < *minor_in) {
+                    (*minor_out)++;
+                    _vol_out *= dim_out[i];
+                  } else {
+                    break;
+                  }
+                }
+              }
+              j = dim_in[(*minor_in)];
+              l = dim_out[(*minor_out)];
+              if (*minor_in == n2o[(*minor_out)] &&
+                  _s1 + _s2 == 0) { // same candidate index to both the input
+                                    // and output index sets
+                if (j > 1 && TENS_TRANSP_BUF_SIZE < _vol_minor * 2)
+                  break;
+                if (_vol_minor * j > TENS_TRANSP_BUF_SIZE) {
+                  *s1_ind = *minor_in;
+                  *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
+                  _s1++;
+                  _s2++;
+                }
                 (*minor_in)++;
                 _vol_in *= j;
                 (*minor_out)++;
-                _vol_out *= l;
-                *minor += 2;
-                _vol_minor *= (j * l);
+                _vol_out *= j;
+                (*minor)++;
+                _vol_minor *= j;
                 m++;
-              } else { // try to accept either one of the two OR both with
-                       // splitting
-                if (j == 1 || l == 1) {
-                  if (j == 1 && _s1 == 0) {
-                    (*minor_in)++;
-                    (*minor)++;
-                    m++;
-                  }
-                  if (l == 1 && _s2 == 0) {
-                    (*minor_out)++;
-                    (*minor)++;
-                    m++;
-                  }
-                } else {
-                  if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
-                      _vol_minor * l > TENS_TRANSP_BUF_SIZE &&
-                      _vol_out >= warpSize &&
-                      _s1 == 0) { // accept the input index, no splitting
-                    (*minor_in)++;
-                    _vol_in *= j;
-                    (*minor)++;
-                    _vol_minor *= j;
-                    m++;
-                  } else if (_vol_minor * j > TENS_TRANSP_BUF_SIZE &&
-                             _vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
-                             _vol_in >= warpSize &&
-                             _s2 ==
-                                 0) { // accept the output index, no splitting
-                    (*minor_out)++;
-                    _vol_out *= l;
-                    (*minor)++;
-                    _vol_minor *= l;
-                    m++;
-                  } else { // splitting is unavoidable (both OR one OR none)
-                    if (TENS_TRANSP_BUF_SIZE >= _vol_minor * 2) {
-                      if (j >= 4 && l >= 4) { // dimension extents are large
-                                              // enough to be split
-                        if (_vol_minor * 4 >
-                            TENS_TRANSP_BUF_SIZE) { // impossible to split both
-                                                    // indices
-                          if (_vol_in <= _vol_out &&
-                              _s1 == 0) { // split the input candidate index
-                            *s1_ind = *minor_in;
-                            *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                            (*minor_in)++;
-                            _vol_in *= j;
-                            (*minor)++;
-                            _vol_minor *= j;
-                            _s1++;
-                            m++;
-                          } else { // split the output candidate index
-                            if (_s2 == 0) {
-                              *s1_ind = n2o[(*minor_out)];
+              } else { // the input and output index sets consider two different
+                       // candidates
+                if (_vol_minor * j * l <= TENS_TRANSP_BUF_SIZE &&
+                    _s1 + _s2 == 0) { // accept both, no splitting
+                  (*minor_in)++;
+                  _vol_in *= j;
+                  (*minor_out)++;
+                  _vol_out *= l;
+                  *minor += 2;
+                  _vol_minor *= (j * l);
+                  m++;
+                } else { // try to accept either one of the two OR both with
+                         // splitting
+                  if (j == 1 || l == 1) {
+                    if (j == 1 && _s1 == 0) {
+                      (*minor_in)++;
+                      (*minor)++;
+                      m++;
+                    }
+                    if (l == 1 && _s2 == 0) {
+                      (*minor_out)++;
+                      (*minor)++;
+                      m++;
+                    }
+                  } else {
+                    if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
+                        _vol_minor * l > TENS_TRANSP_BUF_SIZE &&
+                        _vol_out >= warpSize &&
+                        _s1 == 0) { // accept the input index, no splitting
+                      (*minor_in)++;
+                      _vol_in *= j;
+                      (*minor)++;
+                      _vol_minor *= j;
+                      m++;
+                    } else if (_vol_minor * j > TENS_TRANSP_BUF_SIZE &&
+                               _vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
+                               _vol_in >= warpSize &&
+                               _s2 ==
+                                   0) { // accept the output index, no splitting
+                      (*minor_out)++;
+                      _vol_out *= l;
+                      (*minor)++;
+                      _vol_minor *= l;
+                      m++;
+                    } else { // splitting is unavoidable (both OR one OR none)
+                      if (TENS_TRANSP_BUF_SIZE >= _vol_minor * 2) {
+                        if (j >= 4 && l >= 4) { // dimension extents are large
+                                                // enough to be split
+                          if (_vol_minor * 4 >
+                              TENS_TRANSP_BUF_SIZE) { // impossible to split
+                                                      // both indices
+                            if (_vol_in <= _vol_out &&
+                                _s1 == 0) { // split the input candidate index
+                              *s1_ind = *minor_in;
                               *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
+                              (*minor_in)++;
+                              _vol_in *= j;
+                              (*minor)++;
+                              _vol_minor *= j;
+                              _s1++;
+                              m++;
+                            } else { // split the output candidate index
+                              if (_s2 == 0) {
+                                *s1_ind = n2o[(*minor_out)];
+                                *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
+                                (*minor_out)++;
+                                _vol_out *= l;
+                                (*minor)++;
+                                _vol_minor *= l;
+                                _s2++;
+                                m++;
+                              }
+                            }
+                          } else { // possible to split both indices
+                            i = (int)cl::sycl::sqrt(
+                                ((float)TENS_TRANSP_BUF_SIZE) /
+                                (float)_vol_minor);
+                            if (i < 2)
+                              i = 2; // uniform splitting
+                            *s1_step = i;
+                            *s2_step = i;
+                            *val = (float)_vol_out / (float)_vol_in;
+                            if (*val <
+                                1.0f) { // scale the initial uniform splitting
+                                        // to reflect the disbalance between
+                                        // _vol_in and _vol_out
+                              if (*val * (float)i < 1.0f)
+                                *val = 1.0f / (float)i;
+                              if (*val * (float)l < (float)i)
+                                *val = (float)i / (float)l;
+                            } else {
+                              if (*val * (float)i > (float)j)
+                                *val = (float)j / (float)i;
+                              if (*val > float(i))
+                                *val = (float)i;
+                            }
+                            *s1_step = (int)(((float)i) * *val);
+                            *s2_step = (int)(((float)i) / val);
+                            if (*s1_step >= 2 &&
+                                _s1 == 0) { //&& s1_step <= dim_in[minor_in]
+                              *s1_ind = *minor_in;
+                              (*minor_in)++;
+                              _vol_in *= j;
+                              (*minor)++;
+                              _vol_minor *= j;
+                              _s1++;
+                              m++;
+                            } else {
+                              *s1_step = dim_in[(*s1_ind)];
+                            }
+                            if (*s2_step >= 2 &&
+                                _s2 == 0) { //&& s2_step <= dim_out[minor_out]
+                              *s2_ind = n2o[(*minor_out)];
                               (*minor_out)++;
                               _vol_out *= l;
                               (*minor)++;
                               _vol_minor *= l;
                               _s2++;
                               m++;
+                            } else {
+                              *s2_step = dim_in[(*s2_ind)];
                             }
                           }
-                        } else { // possible to split both indices
-                          i = (int)cl::sycl::sqrt(
-                              ((float)TENS_TRANSP_BUF_SIZE) /
-                              (float)_vol_minor);
-                          if (i < 2)
-                            i = 2; // uniform splitting
-                          *s1_step = i;
-                          *s2_step = i;
-                          *val = (float)_vol_out / (float)_vol_in;
-                          if (*val <
-                              1.0f) { // scale the initial uniform splitting to
-                                      // reflect the disbalance between _vol_in
-                                      // and _vol_out
-                            if (*val * (float)i < 1.0f)
-                              *val = 1.0f / (float)i;
-                            if (*val * (float)l < (float)i)
-                              *val = (float)i / (float)l;
-                          } else {
-                            if (*val * (float)i > (float)j)
-                              *val = (float)j / (float)i;
-                            if (*val > float(i))
-                              *val = (float)i;
-                          }
-                          *s1_step = (int)(((float)i) * *val);
-                          *s2_step = (int)(((float)i) / val);
-                          if (*s1_step >= 2 &&
-                              _s1 == 0) { //&& s1_step <= dim_in[minor_in]
-                            *s1_ind = *minor_in;
-                            (*minor_in)++;
-                            _vol_in *= j;
-                            (*minor)++;
-                            _vol_minor *= j;
-                            _s1++;
-                            m++;
-                          } else {
-                            *s1_step = dim_in[(*s1_ind)];
-                          }
-                          if (*s2_step >= 2 &&
-                              _s2 == 0) { //&& s2_step <= dim_out[minor_out]
-                            *s2_ind = n2o[(*minor_out)];
-                            (*minor_out)++;
-                            _vol_out *= l;
-                            (*minor)++;
-                            _vol_minor *= l;
-                            _s2++;
-                            m++;
-                          } else {
-                            *s2_step = dim_in[(*s2_ind)];
-                          }
-                        }
-                      } else if (j >= 4 && l < 4 &&
-                                 _s1 == 0) { // split the input candidate index
-                        *s1_ind = *minor_in;
-                        *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                        (*minor_in)++;
-                        _vol_in *= j;
-                        (*minor)++;
-                        _vol_minor *= j;
-                        _s1++;
-                        m++;
-                      } else if (j < 4 && l >= 4 &&
-                                 _s2 == 0) { // split the output candidate index
-                        *s1_ind = n2o[(*minor_out)];
-                        *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                        (*minor_out)++;
-                        _vol_out *= l;
-                        (*minor)++;
-                        _vol_minor *= l;
-                        _s2++;
-                        m++;
-                      } else { // both candidate indices have too small extent
-                               // to be split: try to add one of them fully
-                        if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
-                            _s1 == 0) {
+                        } else if (j >= 4 && l < 4 &&
+                                   _s1 ==
+                                       0) { // split the input candidate index
+                          *s1_ind = *minor_in;
+                          *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
                           (*minor_in)++;
                           _vol_in *= j;
                           (*minor)++;
                           _vol_minor *= j;
+                          _s1++;
                           m++;
-                        } else if (_vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
-                                   _s2 == 0) {
+                        } else if (j < 4 && l >= 4 &&
+                                   _s2 ==
+                                       0) { // split the output candidate index
+                          *s1_ind = n2o[(*minor_out)];
+                          *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
                           (*minor_out)++;
                           _vol_out *= l;
                           (*minor)++;
                           _vol_minor *= l;
+                          _s2++;
                           m++;
+                        } else { // both candidate indices have too small extent
+                                 // to be split: try to add one of them fully
+                          if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
+                              _s1 == 0) {
+                            (*minor_in)++;
+                            _vol_in *= j;
+                            (*minor)++;
+                            _vol_minor *= j;
+                            m++;
+                          } else if (_vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
+                                     _s2 == 0) {
+                            (*minor_out)++;
+                            _vol_out *= l;
+                            (*minor)++;
+                            _vol_minor *= l;
+                            m++;
+                          }
                         }
+                      } else { // unable to add more indices in the minor set
+                        break;
                       }
-                    } else { // unable to add more indices in the minor set
-                      break;
                     }
                   }
                 }
               }
             }
+            if (*s1_ind == dim_num - 1 && *s2_ind == dim_num - 1) {
+              *s2_ind = 0;
+              *s2_step = dim_in[0];
+            }      // s1_ind was set while s2_ind was not
+          } else { // tensor block fits into the shared memory buffer from the
+                   // beginning
+            *minor = dim_num;
+            *minor_in = dim_num;
+            *minor_out = dim_num;
+            _vol_minor = _vol;
+            _vol_in = _vol;
+            _vol_out = _vol;
           }
-          if (*s1_ind == dim_num - 1 && *s2_ind == dim_num - 1) {
-            *s2_ind = 0;
-            *s2_step = dim_in[0];
-          }      // s1_ind was set while s2_ind was not
-        } else { // tensor block fits into the shared memory buffer from the
-                 // beginning
-          *minor = dim_num;
-          *minor_in = dim_num;
-          *minor_out = dim_num;
-          _vol_minor = _vol;
-          _vol_in = _vol;
-          _vol_out = _vol;
-        }
-        // Share the tensor transpose configuration with other threads in each
-        // block:
-        *vol_ext = _vol / _vol_minor;
-        *s1_dim = dim_in[(*s1_ind)];
-        *s2_dim = dim_in[(*s2_ind)];
-        // Set indexing bases (OUT:{out,in_c,ext_in}_new;
-        // IN:{in,out_c,ext_in}_old):
-        //  OUTPUT indexing (dim_out[], base_out[]: prioritized new numeration):
-        for (i = 0; i < dim_num; i++) {
-          tmp0[i] = dim_out[i];
-        } // save output dimension extents (new numeration)
-        j = 0;
-        for (i = 0; i < *minor_out; i++) {
-          pri[j++] = i;
-        } // output minor index set (new numeration))
-        for (i = 0; i < dim_num; i++) {
-          if (o2n[i] >= *minor_out)
-            pri[j++] = o2n[i];
-        } //{compl.input minor + external} index set (new numeration)
-        j = 1;
-        for (i = 0; i < dim_num; i++) {
-          dim_out[i] = j;
-          j *= tmp0[i];
-        } // output bases (new numeration)
-        for (i = 0; i < dim_num; i++) {
-          base_out[i] = dim_out[pri[i]];
-        } // output bases (prioritized new numeration)
-        for (i = 0; i < dim_num; i++) {
-          dim_out[i] = tmp0[pri[i]];
-        } // output extents (prioritized new numeration)
-        for (i = 0; i < dim_num; i++) {
-          if (n2o[pri[i]] == *s1_ind) {
-            *s1_ond = i;
-          } else if (n2o[pri[i]] == *s2_ind) {
-            *s2_ond = i;
+          // Share the tensor transpose configuration with other threads in each
+          // block:
+          *vol_ext = _vol / _vol_minor;
+          *s1_dim = dim_in[(*s1_ind)];
+          *s2_dim = dim_in[(*s2_ind)];
+          // Set indexing bases (OUT:{out,in_c,ext_in}_new;
+          // IN:{in,out_c,ext_in}_old):
+          //  OUTPUT indexing (dim_out[], base_out[]: prioritized new
+          //  numeration):
+          for (i = 0; i < dim_num; i++) {
+            tmp0[i] = dim_out[i];
+          } // save output dimension extents (new numeration)
+          j = 0;
+          for (i = 0; i < *minor_out; i++) {
+            pri[j++] = i;
+          } // output minor index set (new numeration))
+          for (i = 0; i < dim_num; i++) {
+            if (o2n[i] >= *minor_out)
+              pri[j++] = o2n[i];
+          } //{compl.input minor + external} index set (new numeration)
+          j = 1;
+          for (i = 0; i < dim_num; i++) {
+            dim_out[i] = j;
+            j *= tmp0[i];
+          } // output bases (new numeration)
+          for (i = 0; i < dim_num; i++) {
+            base_out[i] = dim_out[pri[i]];
+          } // output bases (prioritized new numeration)
+          for (i = 0; i < dim_num; i++) {
+            dim_out[i] = tmp0[pri[i]];
+          } // output extents (prioritized new numeration)
+          for (i = 0; i < dim_num; i++) {
+            if (n2o[pri[i]] == *s1_ind) {
+              *s1_ond = i;
+            } else if (n2o[pri[i]] == *s2_ind) {
+              *s2_ond = i;
+            }
+          } // split indices (prioritized new numeration)
+          //  INPUT indexing (dim_in[], base_in[]: prioritized old numeration):
+          for (i = 0; i < dim_num; i++) {
+            tmp0[i] = dim_in[i];
+          } // save input dimension extents (old numeration)
+          j = 0;
+          for (i = 0; i < *minor_in; i++) {
+            pri[j++] = i;
+          } // input minor index set (old numeration)
+          for (i = 0; i < *minor_out; i++) {
+            if (n2o[i] >= *minor_in)
+              pri[j++] = n2o[i];
+          } // compl.output minor idex set (old numeration)
+          for (i = j; i < dim_num; i++) {
+            pri[i] = n2o[pri[i]];
+          } // external index set (just convert new numbers to old ones for
+            // consistency)
+          j = 1;
+          for (i = 0; i < dim_num; i++) {
+            dim_in[i] = j;
+            j *= tmp0[i];
+          } // input bases (old numeration)
+          for (i = 0; i < dim_num; i++) {
+            base_in[i] = dim_in[pri[i]];
+          } // input bases (prioritized old numeration)
+          for (i = 0; i < dim_num; i++) {
+            dim_in[i] = tmp0[pri[i]];
+          } // input extents (prioritized old numeration)
+          for (i = 0; i < dim_num; i++) {
+            if (pri[i] == *s1_ind) {
+              _s1 = i;
+            } else if (pri[i] == *s2_ind) {
+              _s2 = i;
+            }
+          } // split indices (prioritized old numeration)
+          *s1_ind = _s1;
+          *s2_ind = _s2;
+          *ns1 =
+              1 +
+              (*s1_dim - 1) /
+                  *s1_step; // number of segments from the 1st split minor index
+          *ns2 =
+              1 +
+              (*s2_dim - 1) /
+                  *s2_step; // number of segments from the 2nd split minor index
+          //  Index position correspondence for the minor index set (pri-new -->
+          //  pri-old):
+          j = 0;
+          for (i = 0; i < *minor_out; i++) {
+            if (n2o[i] < *minor_in) {
+              pri[i] = n2o[i];
+            } else {
+              pri[i] = (*minor_in + j);
+              j++;
+            }
           }
-        } // split indices (prioritized new numeration)
-        //  INPUT indexing (dim_in[], base_in[]: prioritized old numeration):
-        for (i = 0; i < dim_num; i++) {
-          tmp0[i] = dim_in[i];
-        } // save input dimension extents (old numeration)
-        j = 0;
-        for (i = 0; i < *minor_in; i++) {
-          pri[j++] = i;
-        } // input minor index set (old numeration)
-        for (i = 0; i < *minor_out; i++) {
-          if (n2o[i] >= *minor_in)
-            pri[j++] = n2o[i];
-        } // compl.output minor idex set (old numeration)
-        for (i = j; i < dim_num; i++) {
-          pri[i] = n2o[pri[i]];
-        } // external index set (just convert new numbers to old ones for
-          // consistency)
-        j = 1;
-        for (i = 0; i < dim_num; i++) {
-          dim_in[i] = j;
-          j *= tmp0[i];
-        } // input bases (old numeration)
-        for (i = 0; i < dim_num; i++) {
-          base_in[i] = dim_in[pri[i]];
-        } // input bases (prioritized old numeration)
-        for (i = 0; i < dim_num; i++) {
-          dim_in[i] = tmp0[pri[i]];
-        } // input extents (prioritized old numeration)
-        for (i = 0; i < dim_num; i++) {
-          if (pri[i] == *s1_ind) {
-            _s1 = i;
-          } else if (pri[i] == *s2_ind) {
-            _s2 = i;
+          j = 0;
+          for (i = 0; i < *minor_in; i++) {
+            if (o2n[i] < *minor_out) {
+              pri[o2n[i]] = i;
+            } else {
+              pri[*minor_out + j] = i;
+              j++;
+            }
           }
-        } // split indices (prioritized old numeration)
-        *s1_ind = _s1;
-        *s2_ind = _s2;
-        *ns1 =
-            1 +
-            (*s1_dim - 1) /
-                *s1_step; // number of segments from the 1st split minor index
-        *ns2 =
-            1 +
-            (*s2_dim - 1) /
-                *s2_step; // number of segments from the 2nd split minor index
-        //  Index position correspondence for the minor index set (pri-new -->
-        //  pri-old):
-        j = 0;
-        for (i = 0; i < *minor_out; i++) {
-          if (n2o[i] < *minor_in) {
-            pri[i] = n2o[i];
-          } else {
-            pri[i] = (*minor_in + j);
-            j++;
-          }
-        }
-        j = 0;
-        for (i = 0; i < *minor_in; i++) {
-          if (o2n[i] < *minor_out) {
-            pri[o2n[i]] = i;
-          } else {
-            pri[*minor_out + j] = i;
-            j++;
-          }
-        }
-        // Check tensor transpose configuration parameters:
-        if (*minor <= 0 || *minor_in <= 0 || *minor_out <= 0 || _vol <= 0 ||
-            _vol_minor <= 0)
-          *err_code += 5000; // trap
-        if (*s1_ind >= dim_num || *s2_ind >= dim_num || *s1_ond >= dim_num ||
-            *s2_ond >= dim_num || *s1_ind == *s2_ind || *s1_ond == *s2_ond ||
-            *s1_step <= 0 || *s2_step <= 0)
-          *err_code += 1000; // trap
-        if ((*s1_step != dim_in[(*s1_ind)] && *s1_ind != *minor_in - 1 &&
-             *s1_ond != *minor_out - 1) ||
-            (*s2_step != dim_in[(*s2_ind)] && *s2_ind != *minor_in - 1 &&
-             *s2_ond != *minor_out - 1))
-          *err_code += 500; // trap
-        if ((_vol_minor * *s1_step * *s2_step) / (*s1_dim * *s2_dim) >
-            TENS_TRANSP_BUF_SIZE)
-          *err_code += 100; // trap
-      }                     // endif: non-trivial permutation
-    } else {
-      *err_code = 1 + 2 * blockDim_x % warpSize;
-    }
+          // Check tensor transpose configuration parameters:
+          if (*minor <= 0 || *minor_in <= 0 || *minor_out <= 0 || _vol <= 0 ||
+              _vol_minor <= 0)
+            *err_code += 5000; // trap
+          if (*s1_ind >= dim_num || *s2_ind >= dim_num || *s1_ond >= dim_num ||
+              *s2_ond >= dim_num || *s1_ind == *s2_ind || *s1_ond == *s2_ond ||
+              *s1_step <= 0 || *s2_step <= 0)
+            *err_code += 1000; // trap
+          if ((*s1_step != dim_in[(*s1_ind)] && *s1_ind != *minor_in - 1 &&
+               *s1_ond != *minor_out - 1) ||
+              (*s2_step != dim_in[(*s2_ind)] && *s2_ind != *minor_in - 1 &&
+               *s2_ond != *minor_out - 1))
+            *err_code += 500; // trap
+          if ((_vol_minor * *s1_step * *s2_step) / (*s1_dim * *s2_dim) >
+              TENS_TRANSP_BUF_SIZE)
+            *err_code += 100; // trap
+        }                     // endif: non-trivial permutation
+      } else {
+        *err_code = 1 + 2 * blockDim_x % warpSize;
+      }
   } // endif: Master thread.
-  item_ct.barrier();
+  item.barrier(cl::sycl::access::fence_space::local_space);
 
   // Proceed:
   if (*err_code == 0) {
     if (*s1_ind > dim_num) { // tag of a trivial permutation
                              // Direct copy:
       _vol = *vol;
-      j = item_ct.get_global_range(2);
-      i = item_ct.get_global_id(2);
+      j = item.get_global_range(0);
+      i = item.get_global_id(0);
       _addr_in = _vol - _vol % j;
       for (_addr = 0; _addr < _addr_in; _addr += j) {
         _addr_out = _addr + i;
@@ -1598,12 +1599,12 @@ be multiple of the warpSize!
         tens_out[_addr_out] += tens_in[_addr_out];
     } else {                      // non-trivial permutation
       l = threadIdx_x / warpSize; // l: warp number
-      // Distribute work accross CUDA blocks (external multi-index + splitting):
-      for (_work_piece = item_ct.get_group(2);
+      // Distribute work accross SYCL work-groups (external multi-index + splitting):
+      for (_work_piece = item.get_group(0);
            _work_piece < *vol_ext * *ns1 * *ns2;
            _work_piece +=
-           item_ct.get_group_range(2)) { //(ns1*ns2*vol_ext) is the total number
-                                         //of independent tasks
+           item.get_group_range(0)) { //(ns1*ns2*vol_ext) is the total number
+                                      // of independent tasks
         _addr = _work_piece;
         _addr /= *vol_ext;
         _vol = _work_piece - _addr * *vol_ext;
@@ -1637,7 +1638,7 @@ be multiple of the warpSize!
             n2o[i] = tmp0[pri[i]]; // look up table to accelerate further
                                    // accesses to tmp0[]
         }
-        item_ct.barrier();
+        item.barrier(cl::sycl::access::fence_space::local_space);
         //  Mount input/output volumes and bases:
         _vol_in = dim_in[0];
         for (i = 1; i < *minor_in; i++) {
@@ -1696,7 +1697,7 @@ be multiple of the warpSize!
               buf0[n * _vol_in + m] = tens_in[_addr + m];
             }
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
           //   Write the minor volume from the buffer into the output tensor
           //   block:
           _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
@@ -1733,7 +1734,7 @@ be multiple of the warpSize!
               tens_out[_addr] += buf0[_vol_in];
             }
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
         } else {
           //  Algorithm 1 (presumably faster):
           //   Create per-block look-up tables:
@@ -1790,7 +1791,7 @@ be multiple of the warpSize!
             }
             stb[j] = n;
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
           //   Read the minor volume into the buffer from the input tensor
           //   block:
           _vol_minor /= _vol_in;              // vol_in_c
@@ -1808,7 +1809,7 @@ be multiple of the warpSize!
               buf0[m * _vol_in + n] = tens_in[_addr];
             }
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
           //   Write the minor volume from the buffer into the output tensor
           //   block:
           _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
@@ -1825,7 +1826,7 @@ be multiple of the warpSize!
               tens_out[_addr] += buf0[_vol_in];
             }
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
         }
       } // enddo _work_piece: independent work distribution among thread blocks
     }
@@ -1833,37 +1834,36 @@ be multiple of the warpSize!
   // Record errors if occured (for each block):
   if (threadIdx_x == 0) {
     if (*err_code != 0)
-      i = atomic_ref<T>( gpu_error_count ).fetch_add(1);
+      i = atomic_ref<int>(gpu_error_count).fetch_add(1);
   }
   return;
 }
 //----------------------------------------------------------------------------------------------------
 // TENSOR TRANSPOSE (shared-memory version):
 template <typename T>
-void gpu_tensor_block_copy_dlf__(
-    int dmo, int drc, int dim_num, int const_args_pos,
-    const T *__restrict__ tens_in, T *__restrict__ tens_out,
-    sycl::nd_item<3> item_ct,
-    dpct::accessor<int, dpct::device, 2> const_args_dims,
-    dpct::accessor<int, dpct::device, 2> const_args_prmn, int *gpu_error_count,
-    T *buf0, float *val, size_t *base_in, size_t *base_out, size_t *ftb,
-    size_t *gtb, int *htb, int *stb, int *dim_in, int *dim_out, int *o2n,
-    int *n2o, int *pri, int *tmp0, int *err_code, int *minor, int *minor_in,
-    int *minor_out, int *s1_ind, int *s1_ond, int *s1_step, int *s1_dim,
-    int *s2_ind, int *s2_ond, int *s2_step, int *s2_dim, int *ns1, int *ns2,
-    size_t *vol, size_t *vol_ext)
+void gpu_tensor_block_copy_dlf__(int dmo, int drc, int dim_num, int const_args_pos,
+				 const T *__restrict__ tens_in, T *__restrict__ tens_out,
+				 cl::sycl::nd_item<1>& item,
+				 constant_accessor<int, 2>& const_args_dims, constant_accessor<int, 2>& const_args_prmn,
+				 int *gpu_error_count,
+				 T *buf0, float *val, size_t *base_in, size_t *base_out, size_t *ftb,
+				 size_t *gtb, int *htb, int *stb, int *dim_in, int *dim_out, int *o2n,
+				 int *n2o, int *pri, int *tmp0, int *err_code, int *minor, int *minor_in,
+				 int *minor_out, int *s1_ind, int *s1_ond, int *s1_step, int *s1_dim,
+				 int *s2_ind, int *s2_ond, int *s2_step, int *s2_dim, int *ns1, int *ns2,
+				 size_t *vol, size_t *vol_ext)
 /**
-Shared-memory version of tensor transpose: tens_out=TRN(tens_in):
-INPUT:
-# dmo - dimension extents order (0: normal, as it is in <const_args>; not 0:
-permuted dimension order will be imposed); # drc - index permutation direction
-(0: normal, as it is in <const_args>; not 0: inversed permutation will be used);
-# dim_num - tensor block rank;
-# const_args_pos - entry in the __constant__ memory bank where tensor block
-dimension extents (const_args_dims) and index permutation (const_args_prmn) are
-stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
-(transposed) tensor; NOTES: # Minimal CUDA execution configuration is
-<<<1,warpSize>>> # Number of threads per block must be multiple of the warpSize!
+   Shared-memory version of tensor transpose: tens_out=TRN(tens_in):
+   INPUT:
+   # dmo - dimension extents order (0: normal, as it is in <const_args>; not 0:
+   permuted dimension order will be imposed); # drc - index permutation direction
+   (0: normal, as it is in <const_args>; not 0: inversed permutation will be used);
+   # dim_num - tensor block rank;
+   # const_args_pos - entry in the __constant__ memory bank where tensor block
+   dimension extents (const_args_dims) and index permutation (const_args_prmn) are
+   stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
+   (transposed) tensor; NOTES: # Minimal SYCL execution configuration is
+   <<<1,warpSize>>> # Number of threads per block must be multiple of the warpSize!
 **/
 {
   size_t _vol, _addr_in, _addr_out, _addr, _work_piece;
@@ -1878,10 +1878,10 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
     + 4*4 + 4*11 + 8*5 = 100
   */
 
-  size_t threadIdx_x = item_ct.get_local_id(2);
-  size_t blockDim_x = item_ct.get_local_range(2);
-  size_t gridDim_x = item_ct.get_group_range(2);
-  size_t blockIdx_x = item_ct.get_group(2);
+  size_t threadIdx_x = item.get_local_id(0);
+  size_t blockDim_x = item.get_local_range(0);
+  size_t gridDim_x = item.get_group_range(0);
+  size_t blockIdx_x = item.get_group(0);
 
   // Determine the minor index set (only the master thread in each thread
   // block):
@@ -2084,8 +2084,8 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
                           *val = (float)_vol_out / (float)_vol_in;
                           if (*val <
                               1.0f) { // scale the initial uniform splitting to
-                                      // reflect the disbalance between
-                            // _vol_in and _vol_out
+                            // reflect the disbalance between _vol_in and
+                            // _vol_out
                             if (*val * (float)i < 1.0f)
                               *val = 1.0f / (float)i;
                             if (*val * (float)l < (float)i)
@@ -2304,7 +2304,7 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
       *err_code = 1 + 2 * blockDim_x % warpSize;
     }
   } // endif: Master thread.
-  item_ct.barrier();
+  item.barrier(cl::sycl::access::fence_space::local_space);
 
   // Proceed:
   if (*err_code == 0) {
@@ -2312,7 +2312,7 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
                              // Direct copy:
       _vol = *vol;
       j = gridDim_x * blockDim_x;
-      i = item_ct.get_global_id(2);
+      i = item.get_global_id(0);
       _addr_in = _vol - _vol % j;
       for (_addr = 0; _addr < _addr_in; _addr += j) {
         _addr_out = _addr + i;
@@ -2360,7 +2360,7 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
             n2o[i] = tmp0[pri[i]]; // look up table to accelerate further
                                    // accesses to tmp0[]
         }
-        item_ct.barrier();
+        item.barrier(cl::sycl::access::fence_space::local_space);
         //  Mount input/output volumes and bases:
         _vol_in = dim_in[0];
         for (i = 1; i < *minor_in; i++) {
@@ -2419,7 +2419,7 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
               buf0[n * _vol_in + m] = tens_in[_addr + m];
             }
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
           //   Write the minor volume from the buffer into the output tensor
           //   block:
           _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
@@ -2456,7 +2456,7 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
               tens_out[_addr] = buf0[_vol_in];
             }
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
         } else {
           //  Algorithm 1 (presumably faster):
           //   Create per-block look-up tables:
@@ -2513,7 +2513,7 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
             }
             stb[j] = n;
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
           //   Read the minor volume into the buffer from the input tensor
           //   block:
           _vol_minor /= _vol_in;              // vol_in_c
@@ -2531,7 +2531,7 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
               buf0[m * _vol_in + n] = tens_in[_addr];
             }
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
           //   Write the minor volume from the buffer into the output tensor
           //   block:
           _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
@@ -2541,14 +2541,14 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
             m = j / _s1;
             n = threadIdx_x +
                 (j - m * _s1 - l) * warpSize; // m: Output column number
-                                              // (out_c); n: Offset in the column
+            // (out_c); n: Offset in the column
             if (n < _vol_out) {
               _addr = _addr_out + gtb[m] + n;
               _vol_in = htb[m] + stb[n];
               tens_out[_addr] = buf0[_vol_in];
             }
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
         }
       } // enddo _work_piece: independent work distribution among thread blocks
     }
@@ -2556,7 +2556,7 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
   // Record errors if occured (for each block):
   if (threadIdx_x == 0) {
     if (*err_code != 0)
-      i = atomic_ref<T>( gpu_error_count ).fetch_add(1);
+      i = atomic_ref<int>(gpu_error_count).fetch_add(1);
   }
   return;
 }
@@ -2566,9 +2566,9 @@ template <typename T>
 void gpu_tensor_block_copy_cmplx_split_in_dlf__(
     int dmo, int drc, int dim_num, int const_args_pos,
     const T *__restrict__ tens_in, T *__restrict__ tens_out,
-    sycl::nd_item<3> item_ct,
-    dpct::accessor<int, dpct::device, 2> const_args_dims,
-    dpct::accessor<int, dpct::device, 2> const_args_prmn, int *gpu_error_count,
+    cl::sycl::nd_item<1>& item,
+    dpct::accessor<int, dpct::device, 2>& const_args_dims,
+    dpct::accessor<int, dpct::device, 2>& const_args_prmn, int *gpu_error_count,
     T *buf0, float *val, size_t *base_in, size_t *base_out, size_t *ftb,
     size_t *gtb, int *htb, int *stb, int *dim_in, int *dim_out, int *o2n,
     int *n2o, int *pri, int *tmp0, int *err_code, int *minor, int *minor_in,
@@ -2590,653 +2590,717 @@ tens_out[0:] - complex output (transposed) tensor in normal representation;
    # Number of threads per block must be multiple of the warpSize!
 **/
 {
-  size_t threadIdx_x = item_ct.get_local_id(2);
-  size_t blockDim_x = item_ct.get_local_range(2);
-  size_t gridDim_x = item_ct.get_group_range(2);
-  size_t blockIdx_x = item_ct.get_group(2);
+    size_t threadIdx_x = item.get_local_id(0);
+    size_t blockDim_x = item.get_local_range(0);
+    size_t gridDim_x = item.get_group_range(0);
+    size_t blockIdx_x = item.get_group(0);
 
-  size_t _vol, _addr_in, _addr_out, _addr, _work_piece;
-  int i, j, k, l, m, n, _vol_minor, _vol_in, _vol_out, _s1, _s2;
-  /*
-    SHARED MEMORY USE (bytes) =
-    + TENS_TRANSP_BUF_SIZE*sizeof(T)
-    + MAX_TENSOR_RANK*(8+8+4+4+4+4+4+4)
-    + TENS_TRANSP_TAB_SIZE*(8+8+4+4)
-    + 4*15 + 8*2
-    MIN REGISTER USE (bytes) per thread =
-    + 4*4 + 4*11 + 8*5 = 100
-  */
+    size_t _vol, _addr_in, _addr_out, _addr, _work_piece;
+    int i, j, k, l, m, n, _vol_minor, _vol_in, _vol_out, _s1, _s2;
+    /*
+      SHARED MEMORY USE (bytes) =
+      + TENS_TRANSP_BUF_SIZE*sizeof(T)
+      + MAX_TENSOR_RANK*(8+8+4+4+4+4+4+4)
+      + TENS_TRANSP_TAB_SIZE*(8+8+4+4)
+      + 4*15 + 8*2
+      MIN REGISTER USE (bytes) per thread =
+      + 4*4 + 4*11 + 8*5 = 100
+    */
 
-  static_assert(ComplexType<T>::valid, "Non-complex types are not allowed!");
-  typename ComplexType<T>::RealType *tens_in_real = (typename ComplexType<T>::RealType *)tens_in;
-  // Determine the minor index set (only the master thread in each thread block):
-  if (threadIdx_x == 0) {
-    *err_code = 0;
-    if (dim_num >= 0 && dim_num <= MAX_TENSOR_RANK && blockDim_x >= warpSize && blockDim_x % warpSize == 0) {
-      *s1_ind = dim_num + 1;
-      *s2_ind = dim_num - 1;
-      _vol = 1;
-      for (i = 0; i < dim_num; i++) {
-        _vol *= const_args_dims[const_args_pos][i];
-        if (const_args_prmn[const_args_pos][i] != i + 1)
-          *s1_ind = 0;
-      };
-      *vol = _vol;        // total volume (number of tensor elements)
-      if (*s1_ind == 0) { // non-trivial permutation
-        // Set input/output permutations and dimension extents:
-        if (drc == 0) { // normal index permutation
-          for (i = 0; i < dim_num; i++)
-            o2n[i] = const_args_prmn[const_args_pos][i] - 1;
-          for (i = 0; i < dim_num; i++)
-            n2o[o2n[i]] = i;
-        } else { // inversed index permutation
-          for (i = 0; i < dim_num; i++)
-            n2o[i] = const_args_prmn[const_args_pos][i] - 1;
-          for (i = 0; i < dim_num; i++)
-            o2n[n2o[i]] = i;
-        }
-        if (dmo == 0) { // normal dimension order
-          for (i = 0; i < dim_num; i++)
-            dim_in[i] = const_args_dims[const_args_pos][i];
-          for (i = 0; i < dim_num; i++)
-            dim_out[o2n[i]] = dim_in[i];
-        } else { // inversed dimension order
-          for (i = 0; i < dim_num; i++)
-            dim_out[i] = const_args_dims[const_args_pos][i];
-          for (i = 0; i < dim_num; i++)
-            dim_in[n2o[i]] = dim_out[i];
-        }
-        *s1_step = dim_in[(*s1_ind)];
-        *s2_step = dim_in[(*s2_ind)];
-        if (_vol > TENS_TRANSP_BUF_SIZE) { // tensor block does not fit into the shared memory buffer
-          // Determine the input/output minor index sets and the combined minor
-          // index set:
-          l = (int)(cl::sycl::sqrt((float)TENS_TRANSP_BUF_SIZE));
-          *minor_in = 0;
-          _vol_in = 1;
-          for (i = 0; i < dim_num; i++) {
-            j = _vol_in * dim_in[i];
-            if (j > l)
-              break;
-            (*minor_in)++;
-            _vol_in = j;
+    static_assert(ComplexType<T>::valid, "Non-complex types are not allowed!");
+    typename ComplexType<T>::RealType *tens_in_real =
+        (typename ComplexType<T>::RealType *)tens_in;
+    // Determine the minor index set (only the master thread in each thread
+    // block):
+    if (threadIdx_x == 0) {
+      *err_code = 0;
+      if (dim_num >= 0 && dim_num <= MAX_TENSOR_RANK &&
+          blockDim_x >= warpSize && blockDim_x % warpSize == 0) {
+        *s1_ind = dim_num + 1;
+        *s2_ind = dim_num - 1;
+        _vol = 1;
+        for (i = 0; i < dim_num; i++) {
+          _vol *= const_args_dims[const_args_pos][i];
+          if (const_args_prmn[const_args_pos][i] != i + 1)
+            *s1_ind = 0;
+        };
+        *vol = _vol;        // total volume (number of tensor elements)
+        if (*s1_ind == 0) { // non-trivial permutation
+          // Set input/output permutations and dimension extents:
+          if (drc == 0) { // normal index permutation
+            for (i = 0; i < dim_num; i++)
+              o2n[i] = const_args_prmn[const_args_pos][i] - 1;
+            for (i = 0; i < dim_num; i++)
+              n2o[o2n[i]] = i;
+          } else { // inversed index permutation
+            for (i = 0; i < dim_num; i++)
+              n2o[i] = const_args_prmn[const_args_pos][i] - 1;
+            for (i = 0; i < dim_num; i++)
+              o2n[n2o[i]] = i;
           }
-          *minor_out = 0;
-          _vol_out = 1;
-          for (i = 0; i < dim_num; i++) {
-            j = _vol_out * dim_out[i];
-            if (j > l)
-              break;
-            (*minor_out)++;
-            _vol_out = j;
+          if (dmo == 0) { // normal dimension order
+            for (i = 0; i < dim_num; i++)
+              dim_in[i] = const_args_dims[const_args_pos][i];
+            for (i = 0; i < dim_num; i++)
+              dim_out[o2n[i]] = dim_in[i];
+          } else { // inversed dimension order
+            for (i = 0; i < dim_num; i++)
+              dim_out[i] = const_args_dims[const_args_pos][i];
+            for (i = 0; i < dim_num; i++)
+              dim_in[n2o[i]] = dim_out[i];
           }
-          *minor = *minor_in;
-          _vol_minor = _vol_in;
-          for (i = 0; i < *minor_out; i++) {
-            if (n2o[i] >= *minor_in) {
-              (*minor)++;
-              _vol_minor *= dim_out[i];
-            }
-          }
-          m = 1;
-          _s1 = 0;
-          _s2 = 0;
-          while (_vol_minor < TENS_TRANSP_BUF_SIZE && m != 0) {
-            m = 0;
-            if (_s1 == 0) {
-              for (i = *minor_in; i < dim_num; i++) {
-                if (o2n[i] < *minor_out) {
-                  (*minor_in)++;
-                  _vol_in *= dim_in[i];
-                } else {
-                  break;
-                }
-              }
-            }
-            if (_s2 == 0) {
-              for (i = *minor_out; i < dim_num; i++) {
-                if (n2o[i] < *minor_in) {
-                  (*minor_out)++;
-                  _vol_out *= dim_out[i];
-                } else {
-                  break;
-                }
-              }
-            }
-            j = dim_in[(*minor_in)];
-            l = dim_out[(*minor_out)];
-            if (*minor_in == n2o[(*minor_out)] && _s1 + _s2 == 0) { // same candidate index to both the input and output index sets
-              if (j > 1 && TENS_TRANSP_BUF_SIZE < _vol_minor * 2)
+          *s1_step = dim_in[(*s1_ind)];
+          *s2_step = dim_in[(*s2_ind)];
+          if (_vol > TENS_TRANSP_BUF_SIZE) { // tensor block does not fit into
+                                             // the shared memory buffer
+            // Determine the input/output minor index sets and the combined
+            // minor index set:
+            l = (int)(cl::sycl::sqrt((float)TENS_TRANSP_BUF_SIZE));
+            *minor_in = 0;
+            _vol_in = 1;
+            for (i = 0; i < dim_num; i++) {
+              j = _vol_in * dim_in[i];
+              if (j > l)
                 break;
-              if (_vol_minor * j > TENS_TRANSP_BUF_SIZE) {
-                *s1_ind = *minor_in;
-                *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                _s1++;
-                _s2++;
-              }
               (*minor_in)++;
-              _vol_in *= j;
+              _vol_in = j;
+            }
+            *minor_out = 0;
+            _vol_out = 1;
+            for (i = 0; i < dim_num; i++) {
+              j = _vol_out * dim_out[i];
+              if (j > l)
+                break;
               (*minor_out)++;
-              _vol_out *= j;
-              (*minor)++;
-              _vol_minor *= j;
-              m++;
-            } else { // the input and output index sets consider two different candidates
-              if (_vol_minor * j * l <= TENS_TRANSP_BUF_SIZE && _s1 + _s2 == 0) { // accept both, no splitting
+              _vol_out = j;
+            }
+            *minor = *minor_in;
+            _vol_minor = _vol_in;
+            for (i = 0; i < *minor_out; i++) {
+              if (n2o[i] >= *minor_in) {
+                (*minor)++;
+                _vol_minor *= dim_out[i];
+              }
+            }
+            m = 1;
+            _s1 = 0;
+            _s2 = 0;
+            while (_vol_minor < TENS_TRANSP_BUF_SIZE && m != 0) {
+              m = 0;
+              if (_s1 == 0) {
+                for (i = *minor_in; i < dim_num; i++) {
+                  if (o2n[i] < *minor_out) {
+                    (*minor_in)++;
+                    _vol_in *= dim_in[i];
+                  } else {
+                    break;
+                  }
+                }
+              }
+              if (_s2 == 0) {
+                for (i = *minor_out; i < dim_num; i++) {
+                  if (n2o[i] < *minor_in) {
+                    (*minor_out)++;
+                    _vol_out *= dim_out[i];
+                  } else {
+                    break;
+                  }
+                }
+              }
+              j = dim_in[(*minor_in)];
+              l = dim_out[(*minor_out)];
+              if (*minor_in == n2o[(*minor_out)] &&
+                  _s1 + _s2 == 0) { // same candidate index to both the input
+                                    // and output index sets
+                if (j > 1 && TENS_TRANSP_BUF_SIZE < _vol_minor * 2)
+                  break;
+                if (_vol_minor * j > TENS_TRANSP_BUF_SIZE) {
+                  *s1_ind = *minor_in;
+                  *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
+                  _s1++;
+                  _s2++;
+                }
                 (*minor_in)++;
                 _vol_in *= j;
                 (*minor_out)++;
-                _vol_out *= l;
-                *minor += 2;
-                _vol_minor *= (j * l);
+                _vol_out *= j;
+                (*minor)++;
+                _vol_minor *= j;
                 m++;
-              } else { // try to accept either one of the two OR both with splitting
-                if (j == 1 || l == 1) {
-                  if (j == 1 && _s1 == 0) {
-                    (*minor_in)++;
-                    (*minor)++;
-                    m++;
-                  }
-                  if (l == 1 && _s2 == 0) {
-                    (*minor_out)++;
-                    (*minor)++;
-                    m++;
-                  }
-                } else {
-                  if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
-                      _vol_minor * l > TENS_TRANSP_BUF_SIZE &&
-                      _vol_out >= warpSize && _s1 == 0) { // accept the input index, no splitting
-                    (*minor_in)++;
-                    _vol_in *= j;
-                    (*minor)++;
-                    _vol_minor *= j;
-                    m++;
-                  } else if (_vol_minor * j > TENS_TRANSP_BUF_SIZE &&
-                             _vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
-                             _vol_in >= warpSize &&
-                             _s2 == 0) { // accept the output index, no splitting
-                    (*minor_out)++;
-                    _vol_out *= l;
-                    (*minor)++;
-                    _vol_minor *= l;
-                    m++;
-                  } else { // splitting is unavoidable (both OR one OR none)
-                    if (TENS_TRANSP_BUF_SIZE >= _vol_minor * 2) {
-                      if (j >= 4 && l >= 4) { // dimension extents are large enough to be split
-                        if (_vol_minor * 4 > TENS_TRANSP_BUF_SIZE) { // impossible to split both indices
-                          if (_vol_in <= _vol_out && _s1 == 0) { // split the input candidate index
-                            *s1_ind = *minor_in;
-                            *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                            (*minor_in)++;
-                            _vol_in *= j;
-                            (*minor)++;
-                            _vol_minor *= j;
-                            _s1++;
-                            m++;
-                          } else { // split the output candidate index
-                            if (_s2 == 0) {
-                              *s1_ind = n2o[(*minor_out)];
+              } else { // the input and output index sets consider two different
+                       // candidates
+                if (_vol_minor * j * l <= TENS_TRANSP_BUF_SIZE &&
+                    _s1 + _s2 == 0) { // accept both, no splitting
+                  (*minor_in)++;
+                  _vol_in *= j;
+                  (*minor_out)++;
+                  _vol_out *= l;
+                  *minor += 2;
+                  _vol_minor *= (j * l);
+                  m++;
+                } else { // try to accept either one of the two OR both with
+                         // splitting
+                  if (j == 1 || l == 1) {
+                    if (j == 1 && _s1 == 0) {
+                      (*minor_in)++;
+                      (*minor)++;
+                      m++;
+                    }
+                    if (l == 1 && _s2 == 0) {
+                      (*minor_out)++;
+                      (*minor)++;
+                      m++;
+                    }
+                  } else {
+                    if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
+                        _vol_minor * l > TENS_TRANSP_BUF_SIZE &&
+                        _vol_out >= warpSize &&
+                        _s1 == 0) { // accept the input index, no splitting
+                      (*minor_in)++;
+                      _vol_in *= j;
+                      (*minor)++;
+                      _vol_minor *= j;
+                      m++;
+                    } else if (_vol_minor * j > TENS_TRANSP_BUF_SIZE &&
+                               _vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
+                               _vol_in >= warpSize &&
+                               _s2 ==
+                                   0) { // accept the output index, no splitting
+                      (*minor_out)++;
+                      _vol_out *= l;
+                      (*minor)++;
+                      _vol_minor *= l;
+                      m++;
+                    } else { // splitting is unavoidable (both OR one OR none)
+                      if (TENS_TRANSP_BUF_SIZE >= _vol_minor * 2) {
+                        if (j >= 4 && l >= 4) { // dimension extents are large
+                                                // enough to be split
+                          if (_vol_minor * 4 >
+                              TENS_TRANSP_BUF_SIZE) { // impossible to split
+                                                      // both indices
+                            if (_vol_in <= _vol_out &&
+                                _s1 == 0) { // split the input candidate index
+                              *s1_ind = *minor_in;
                               *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
+                              (*minor_in)++;
+                              _vol_in *= j;
+                              (*minor)++;
+                              _vol_minor *= j;
+                              _s1++;
+                              m++;
+                            } else { // split the output candidate index
+                              if (_s2 == 0) {
+                                *s1_ind = n2o[(*minor_out)];
+                                *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
+                                (*minor_out)++;
+                                _vol_out *= l;
+                                (*minor)++;
+                                _vol_minor *= l;
+                                _s2++;
+                                m++;
+                              }
+                            }
+                          } else { // possible to split both indices
+                            i = (int)cl::sycl::sqrt(
+                                ((float)TENS_TRANSP_BUF_SIZE) /
+                                (float)_vol_minor);
+                            if (i < 2)
+                              i = 2; // uniform splitting
+                            *s1_step = i;
+                            *s2_step = i;
+                            *val = (float)_vol_out / (float)_vol_in;
+                            if (*val < 1.0f) { // scale the initial uniform
+                                               // splitting to
+                              // reflect the disbalance between _vol_in and
+                              // vol_out
+                              if (*val * (float)i < 1.0f)
+                                *val = 1.0f / (float)i;
+                              if (*val * (float)l < (float)i)
+                                *val = (float)i / (float)l;
+                            } else {
+                              if (*val * (float)i > (float)j)
+                                *val = (float)j / (float)i;
+                              if (*val > float(i))
+                                *val = (float)i;
+                            }
+                            *s1_step = (int)(((float)i) * *val);
+                            *s2_step = (int)(((float)i) / *val);
+                            if (*s1_step >= 2 &&
+                                _s1 == 0) { //&& s1_step <= dim_in[minor_in]
+                              *s1_ind = *minor_in;
+                              (*minor_in)++;
+                              _vol_in *= j;
+                              (*minor)++;
+                              _vol_minor *= j;
+                              _s1++;
+                              m++;
+                            } else {
+                              *s1_step = dim_in[(*s1_ind)];
+                            }
+                            if (*s2_step >= 2 &&
+                                _s2 == 0) { //&& s2_step <= dim_out[minor_out]
+                              *s2_ind = n2o[(*minor_out)];
                               (*minor_out)++;
                               _vol_out *= l;
                               (*minor)++;
                               _vol_minor *= l;
                               _s2++;
                               m++;
+                            } else {
+                              *s2_step = dim_in[(*s2_ind)];
                             }
                           }
-                        } else { // possible to split both indices
-                          i = (int)cl::sycl::sqrt( ((float)TENS_TRANSP_BUF_SIZE) / (float)_vol_minor);
-                          if (i < 2)
-                            i = 2; // uniform splitting
-                          *s1_step = i;
-                          *s2_step = i;
-                          *val = (float)_vol_out / (float)_vol_in;
-                          if (*val < 1.0f) { // scale the initial uniform splitting to
-			    // reflect the disbalance between _vol_in and vol_out
-                            if (*val * (float)i < 1.0f)
-                              *val = 1.0f / (float)i;
-                            if (*val * (float)l < (float)i)
-                              *val = (float)i / (float)l;
-                          } else {
-                            if (*val * (float)i > (float)j)
-                              *val = (float)j / (float)i;
-                            if (*val > float(i))
-                              *val = (float)i;
-                          }
-                          *s1_step = (int)(((float)i) * *val);
-                          *s2_step = (int)(((float)i) / *val);
-                          if (*s1_step >= 2 && _s1 == 0) { //&& s1_step <= dim_in[minor_in]
-                            *s1_ind = *minor_in;
-                            (*minor_in)++;
-                            _vol_in *= j;
-                            (*minor)++;
-                            _vol_minor *= j;
-                            _s1++;
-                            m++;
-                          } else {
-                            *s1_step = dim_in[(*s1_ind)];
-                          }
-                          if (*s2_step >= 2 && _s2 == 0) { //&& s2_step <= dim_out[minor_out]
-                            *s2_ind = n2o[(*minor_out)];
-                            (*minor_out)++;
-                            _vol_out *= l;
-                            (*minor)++;
-                            _vol_minor *= l;
-                            _s2++;
-                            m++;
-                          } else {
-                            *s2_step = dim_in[(*s2_ind)];
-                          }
-                        }
-                      } else if (j >= 4 && l < 4 && _s1 == 0) { // split the input candidate index
-                        *s1_ind = *minor_in;
-                        *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                        (*minor_in)++;
-                        _vol_in *= j;
-                        (*minor)++;
-                        _vol_minor *= j;
-                        _s1++;
-                        m++;
-                      } else if (j < 4 && l >= 4 && _s2 == 0) { // split the output candidate index
-                        *s1_ind = n2o[(*minor_out)];
-                        *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                        (*minor_out)++;
-                        _vol_out *= l;
-                        (*minor)++;
-                        _vol_minor *= l;
-                        _s2++;
-                        m++;
-                      } else { // both candidate indices have too small extent to be split: try to add one of them fully
-                        if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
-                            _s1 == 0) {
+                        } else if (j >= 4 && l < 4 &&
+                                   _s1 ==
+                                       0) { // split the input candidate index
+                          *s1_ind = *minor_in;
+                          *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
                           (*minor_in)++;
                           _vol_in *= j;
                           (*minor)++;
                           _vol_minor *= j;
+                          _s1++;
                           m++;
-                        } else if (_vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
-                                   _s2 == 0) {
+                        } else if (j < 4 && l >= 4 &&
+                                   _s2 ==
+                                       0) { // split the output candidate index
+                          *s1_ind = n2o[(*minor_out)];
+                          *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
                           (*minor_out)++;
                           _vol_out *= l;
                           (*minor)++;
                           _vol_minor *= l;
+                          _s2++;
                           m++;
+                        } else { // both candidate indices have too small extent
+                                 // to be split: try to add one of them fully
+                          if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
+                              _s1 == 0) {
+                            (*minor_in)++;
+                            _vol_in *= j;
+                            (*minor)++;
+                            _vol_minor *= j;
+                            m++;
+                          } else if (_vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
+                                     _s2 == 0) {
+                            (*minor_out)++;
+                            _vol_out *= l;
+                            (*minor)++;
+                            _vol_minor *= l;
+                            m++;
+                          }
                         }
+                      } else { // unable to add more indices in the minor set
+                        break;
                       }
-                    } else { // unable to add more indices in the minor set
-                      break;
                     }
                   }
                 }
               }
             }
+            if (*s1_ind == dim_num - 1 && *s2_ind == dim_num - 1) {
+              *s2_ind = 0;
+              *s2_step = dim_in[0];
+            }      // s1_ind was set while s2_ind was not
+          } else { // tensor block fits into the shared memory buffer from the
+                   // beginning
+            *minor = dim_num;
+            *minor_in = dim_num;
+            *minor_out = dim_num;
+            _vol_minor = _vol;
+            _vol_in = _vol;
+            _vol_out = _vol;
           }
-          if (*s1_ind == dim_num - 1 && *s2_ind == dim_num - 1) {
-            *s2_ind = 0;
-            *s2_step = dim_in[0];
-          }      // s1_ind was set while s2_ind was not
-        } else { // tensor block fits into the shared memory buffer from the
-                 // beginning
-          *minor = dim_num;
-          *minor_in = dim_num;
-          *minor_out = dim_num;
-          _vol_minor = _vol;
-          _vol_in = _vol;
-          _vol_out = _vol;
-        }
-        // Share the tensor transpose configuration with other threads in each
-        // block:
-        *vol_ext = _vol / _vol_minor;
-        *s1_dim = dim_in[(*s1_ind)];
-        *s2_dim = dim_in[(*s2_ind)];
-        // Set indexing bases (OUT:{out,in_c,ext_in}_new;
-        // IN:{in,out_c,ext_in}_old):
-        //  OUTPUT indexing (dim_out[], base_out[]: prioritized new numeration):
-        for (i = 0; i < dim_num; i++) {
-          tmp0[i] = dim_out[i];
-        } // save output dimension extents (new numeration)
-        j = 0;
-        for (i = 0; i < *minor_out; i++) {
-          pri[j++] = i;
-        } // output minor index set (new numeration))
-        for (i = 0; i < dim_num; i++) {
-          if (o2n[i] >= *minor_out)
-            pri[j++] = o2n[i];
-        } //{compl.input minor + external} index set (new numeration)
-        j = 1;
-        for (i = 0; i < dim_num; i++) {
-          dim_out[i] = j;
-          j *= tmp0[i];
-        } // output bases (new numeration)
-        for (i = 0; i < dim_num; i++) {
-          base_out[i] = dim_out[pri[i]];
-        } // output bases (prioritized new numeration)
-        for (i = 0; i < dim_num; i++) {
-          dim_out[i] = tmp0[pri[i]];
-        } // output extents (prioritized new numeration)
-        for (i = 0; i < dim_num; i++) {
-          if (n2o[pri[i]] == *s1_ind) {
-            *s1_ond = i;
-          } else if (n2o[pri[i]] == *s2_ind) {
-            *s2_ond = i;
-          }
-        } // split indices (prioritized new numeration)
-        //  INPUT indexing (dim_in[], base_in[]: prioritized old numeration):
-        for (i = 0; i < dim_num; i++) {
-          tmp0[i] = dim_in[i];
-        } // save input dimension extents (old numeration)
-        j = 0;
-        for (i = 0; i < *minor_in; i++) {
-          pri[j++] = i;
-        } // input minor index set (old numeration)
-        for (i = 0; i < *minor_out; i++) {
-          if (n2o[i] >= *minor_in)
-            pri[j++] = n2o[i];
-        } // compl.output minor idex set (old numeration)
-        for (i = j; i < dim_num; i++) {
-          pri[i] = n2o[pri[i]];
-        } // external index set (just convert new numbers to old ones for consistency)
-        j = 1;
-        for (i = 0; i < dim_num; i++) {
-          dim_in[i] = j;
-          j *= tmp0[i];
-        } // input bases (old numeration)
-        for (i = 0; i < dim_num; i++) {
-          base_in[i] = dim_in[pri[i]];
-        } // input bases (prioritized old numeration)
-        for (i = 0; i < dim_num; i++) {
-          dim_in[i] = tmp0[pri[i]];
-        } // input extents (prioritized old numeration)
-        for (i = 0; i < dim_num; i++) {
-          if (pri[i] == *s1_ind) {
-            _s1 = i;
-          } else if (pri[i] == *s2_ind) {
-            _s2 = i;
-          }
-        } // split indices (prioritized old numeration)
-        *s1_ind = _s1;
-        *s2_ind = _s2;
-        *ns1 = 1 + (*s1_dim - 1) / *s1_step; // number of segments from the 1st split minor index
-        *ns2 = 1 + (*s2_dim - 1) / *s2_step; // number of segments from the 2nd split minor index
-        //  Index position correspondence for the minor index set (pri-new --> pri-old):
-        j = 0;
-        for (i = 0; i < *minor_out; i++) {
-          if (n2o[i] < *minor_in) {
-            pri[i] = n2o[i];
-          } else {
-            pri[i] = (*minor_in + j);
-            j++;
-          }
-        }
-        j = 0;
-        for (i = 0; i < *minor_in; i++) {
-          if (o2n[i] < *minor_out) {
-            pri[o2n[i]] = i;
-          } else {
-            pri[*minor_out + j] = i;
-            j++;
-          }
-        }
-        // Check tensor transpose configuration parameters:
-        if (*minor <= 0 || *minor_in <= 0 || *minor_out <= 0 || _vol <= 0 ||
-            _vol_minor <= 0)
-          *err_code += 5000; // trap
-        if (*s1_ind >= dim_num || *s2_ind >= dim_num || *s1_ond >= dim_num ||
-            *s2_ond >= dim_num || *s1_ind == *s2_ind || *s1_ond == *s2_ond ||
-            *s1_step <= 0 || *s2_step <= 0)
-          *err_code += 1000; // trap
-        if ((*s1_step != dim_in[(*s1_ind)] && *s1_ind != *minor_in - 1 &&
-             *s1_ond != *minor_out - 1) ||
-            (*s2_step != dim_in[(*s2_ind)] && *s2_ind != *minor_in - 1 &&
-             *s2_ond != *minor_out - 1))
-          *err_code += 500; // trap
-        if ((_vol_minor * *s1_step * *s2_step) / (*s1_dim * *s2_dim) >
-            TENS_TRANSP_BUF_SIZE)
-          *err_code += 100; // trap
-      }                     // endif: non-trivial permutation
-    } else {
-      *err_code = 1 + 2 * blockDim_x % warpSize;
-    }
-  } // endif: Master thread.
-  item_ct.barrier();
-
-  // Proceed:
-  if (*err_code == 0) {
-    if (*s1_ind > dim_num) { // tag of a trivial permutation
-                             // Direct copy:
-      _vol = *vol;
-      j = item_ct.get_global_range(2);
-      i = item_ct.get_global_id(2);
-      _addr_in = _vol - _vol % j;
-      for (_addr = 0; _addr < _addr_in; _addr += j) {
-        _addr_out = _addr + i;
-        auto real_part = tens_in_real[_addr_out];
-        auto imag_part = tens_in_real[_addr_out + _vol];
-        tens_out[_addr_out] = T{real_part, imag_part};
-      }
-      _addr_out = _addr_in + i;
-      if (_addr_out < _vol) {
-        auto real_part = tens_in_real[_addr_out];
-        auto imag_part = tens_in_real[_addr_out + _vol];
-        tens_out[_addr_out] = T{real_part, imag_part};
-      }
-    } else {                      // non-trivial permutation
-      l = threadIdx_x / warpSize; // l: warp number
-      // Distribute work accross CUDA blocks (external multi-index + splitting):
-      for (_work_piece = blockIdx_x; _work_piece < *vol_ext * *ns1 * *ns2; _work_piece += gridDim_x) { //(ns1*ns2*vol_ext)
-        // is the total number of independent tasks
-        _addr = _work_piece;
-        _addr /= *vol_ext;
-        _vol = _work_piece - _addr * *vol_ext;
-        _s2 = (int)(_addr / *ns1);
-        _s1 = (int)(_addr - _s2 * *ns1); //{_addr_ext,_s1,_s2} --> tensor subblock (CUDA block)
-        //  Modify dimension extents due to possible dimension splitting:
-        if (threadIdx_x == 0) {
-          if (_s1 + 1 == *ns1) { // last segment of the 1st split index
-            j = *s1_dim - _s1 * *s1_step;
-            dim_in[(*s1_ind)] = j;
-            dim_out[(*s1_ond)] = j;
-          } else { // internal segment of the 1st split index
-            dim_in[(*s1_ind)] = *s1_step;
-            dim_out[(*s1_ond)] = *s1_step;
-          }
-          if (_s2 + 1 == *ns2) { // last segment of the 2nd split index
-            j = *s2_dim - _s2 * *s2_step;
-            dim_in[(*s2_ind)] = j;
-            dim_out[(*s2_ond)] = j;
-          } else { // internal segment of the 2nd split index
-            dim_in[(*s2_ind)] = *s2_step;
-            dim_out[(*s2_ond)] = *s2_step;
-          }
+          // Share the tensor transpose configuration with other threads in each
+          // block:
+          *vol_ext = _vol / _vol_minor;
+          *s1_dim = dim_in[(*s1_ind)];
+          *s2_dim = dim_in[(*s2_ind)];
+          // Set indexing bases (OUT:{out,in_c,ext_in}_new;
+          // IN:{in,out_c,ext_in}_old):
+          //  OUTPUT indexing (dim_out[], base_out[]: prioritized new
+          //  numeration):
+          for (i = 0; i < dim_num; i++) {
+            tmp0[i] = dim_out[i];
+          } // save output dimension extents (new numeration)
+          j = 0;
+          for (i = 0; i < *minor_out; i++) {
+            pri[j++] = i;
+          } // output minor index set (new numeration))
+          for (i = 0; i < dim_num; i++) {
+            if (o2n[i] >= *minor_out)
+              pri[j++] = o2n[i];
+          } //{compl.input minor + external} index set (new numeration)
           j = 1;
-          for (i = 0; i < *minor; i++) {
-            tmp0[i] = j;
-            j *= dim_in[i];
-          } // minor buffer bases (pri-old)
-          for (i = 0; i < *minor; i++)
-            n2o[i] = tmp0[pri[i]]; // look up table to accelerate further accesses to tmp0[]
-        }
-        item_ct.barrier();
-        //  Mount input/output volumes and bases:
-        _vol_in = dim_in[0];
-        for (i = 1; i < *minor_in; i++) {
-          _vol_in *= dim_in[i];
-        }
-        _vol_out = dim_out[0];
-        for (i = 1; i < *minor_out; i++) {
-          _vol_out *= dim_out[i];
-        }
-        _vol_minor = _vol_out;
-        for (i = *minor_out; i < *minor; i++) {
-          _vol_minor *= dim_out[i];
-        }
-        _addr_in = (_s1 * *s1_step) * base_in[(*s1_ind)] + (_s2 * *s2_step) * base_in[(*s2_ind)];
-        _addr_out = _vol;
-        for (i = *minor; i < dim_num; i++) {
-          _addr = _vol / dim_in[i];
-          _addr_in += (_vol - _addr * dim_in[i]) * base_in[i];
-          _vol = _addr;
-        }
-        _vol = _addr_out;
-        _addr_out = (_s1 * *s1_step) * base_out[(*s1_ond)] + (_s2 * *s2_step) * base_out[(*s2_ond)];
-        for (i = *minor; i < dim_num; i++) {
-          _addr = _vol / dim_out[i];
-          _addr_out += (_vol - _addr * dim_out[i]) * base_out[i];
-          _vol = _addr;
-        }
-        if (_vol_out > TENS_TRANSP_TAB_SIZE ||
-            _vol_minor > _vol_in * TENS_TRANSP_TAB_SIZE ||
-            _vol_minor > _vol_out * TENS_TRANSP_TAB_SIZE) {
-          //  Algorithm 0 (slower):
-          //   Read the minor volume into the buffer from the input tensor
-          //   block:
-          _vol_minor /= _vol_in;              // vol_in_c
-          _s1 = 1 + (_vol_in - 1) / warpSize; // number of warps (lines) whichfully cover the input volume
-          _s2 = blockDim_x / warpSize; // number of whole warps in a thread block (each warp treats one line)
-          for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
-            m = j / _s1;
-            _addr = _addr_in;
-            n = m; // n: Input column number (in_c)
-            for (i = *minor_in; i < *minor; i++) {
-              k = m / dim_in[i];
-              _addr += (m - k * dim_in[i]) * base_in[i];
-              m = k;
+          for (i = 0; i < dim_num; i++) {
+            dim_out[i] = j;
+            j *= tmp0[i];
+          } // output bases (new numeration)
+          for (i = 0; i < dim_num; i++) {
+            base_out[i] = dim_out[pri[i]];
+          } // output bases (prioritized new numeration)
+          for (i = 0; i < dim_num; i++) {
+            dim_out[i] = tmp0[pri[i]];
+          } // output extents (prioritized new numeration)
+          for (i = 0; i < dim_num; i++) {
+            if (n2o[pri[i]] == *s1_ind) {
+              *s1_ond = i;
+            } else if (n2o[pri[i]] == *s2_ind) {
+              *s2_ond = i;
             }
-            //    m=(j%_s1)*warpSize+threadIdx.x%warpSize; //elemental offset in the input volume
-            m = threadIdx_x + (j - n * _s1 - l) * warpSize; // elemental offset in the input volume (alternative)
-            if (m < _vol_in) {
-              auto real_part = tens_in_real[_addr + m];
-              auto imag_part = tens_in_real[_addr + m + _vol];
-              buf0[n * _vol_in + m] = T{real_part, imag_part};
+          } // split indices (prioritized new numeration)
+          //  INPUT indexing (dim_in[], base_in[]: prioritized old numeration):
+          for (i = 0; i < dim_num; i++) {
+            tmp0[i] = dim_in[i];
+          } // save input dimension extents (old numeration)
+          j = 0;
+          for (i = 0; i < *minor_in; i++) {
+            pri[j++] = i;
+          } // input minor index set (old numeration)
+          for (i = 0; i < *minor_out; i++) {
+            if (n2o[i] >= *minor_in)
+              pri[j++] = n2o[i];
+          } // compl.output minor idex set (old numeration)
+          for (i = j; i < dim_num; i++) {
+            pri[i] = n2o[pri[i]];
+          } // external index set (just convert new numbers to old ones for
+            // consistency)
+          j = 1;
+          for (i = 0; i < dim_num; i++) {
+            dim_in[i] = j;
+            j *= tmp0[i];
+          } // input bases (old numeration)
+          for (i = 0; i < dim_num; i++) {
+            base_in[i] = dim_in[pri[i]];
+          } // input bases (prioritized old numeration)
+          for (i = 0; i < dim_num; i++) {
+            dim_in[i] = tmp0[pri[i]];
+          } // input extents (prioritized old numeration)
+          for (i = 0; i < dim_num; i++) {
+            if (pri[i] == *s1_ind) {
+              _s1 = i;
+            } else if (pri[i] == *s2_ind) {
+              _s2 = i;
+            }
+          } // split indices (prioritized old numeration)
+          *s1_ind = _s1;
+          *s2_ind = _s2;
+          *ns1 =
+              1 +
+              (*s1_dim - 1) /
+                  *s1_step; // number of segments from the 1st split minor index
+          *ns2 =
+              1 +
+              (*s2_dim - 1) /
+                  *s2_step; // number of segments from the 2nd split minor index
+          //  Index position correspondence for the minor index set (pri-new -->
+          //  pri-old):
+          j = 0;
+          for (i = 0; i < *minor_out; i++) {
+            if (n2o[i] < *minor_in) {
+              pri[i] = n2o[i];
+            } else {
+              pri[i] = (*minor_in + j);
+              j++;
             }
           }
-          item_ct.barrier();
-          //   Write the minor volume from the buffer into the output tensor
-          //   block:
-          _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
-          _s1 = 1 + (_vol_out - 1) / warpSize; // number of warps (lines) which fully cover the output volume
-          for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
-            n = j / _s1;
-            _addr = _addr_out;
-            _vol = n;
-            _vol_in = 0; //_vol: Output column number (out_c)
-            //    for(i=minor_out;i<minor;i++){m=n%dim_out[i]; n/=dim_out[i];
-            //    _addr+=m*base_out[i]; _vol_in+=m*tmp0[pri[i]];}
-            for (i = *minor_out; i < *minor; i++) {
-              k = n / dim_out[i];
-              m = n - k * dim_out[i];
-              n = k;
-              _addr += m * base_out[i];
-              _vol_in += m * n2o[i];
+          j = 0;
+          for (i = 0; i < *minor_in; i++) {
+            if (o2n[i] < *minor_out) {
+              pri[o2n[i]] = i;
+            } else {
+              pri[*minor_out + j] = i;
+              j++;
             }
-            //    m=(j%_s1)*warpSize+threadIdx.x%warpSize; //elemental offset in the output volume
-            m = threadIdx_x + (j - (int)_vol * _s1 - l) * warpSize; // elemental offset in the output volume (alternative)
-            if (m < _vol_out) {
-              _addr += m;
-              //     for(i=0;i<minor_out;i++){_vol_in+=(m%dim_out[i])*tmp0[pri[i]];
-              //     m/=dim_out[i];}
-              for (i = 0; i < *minor_out; i++) {
-                k = m / dim_out[i];
-                _vol_in += (m - k * dim_out[i]) * n2o[i];
+          }
+          // Check tensor transpose configuration parameters:
+          if (*minor <= 0 || *minor_in <= 0 || *minor_out <= 0 || _vol <= 0 ||
+              _vol_minor <= 0)
+            *err_code += 5000; // trap
+          if (*s1_ind >= dim_num || *s2_ind >= dim_num || *s1_ond >= dim_num ||
+              *s2_ond >= dim_num || *s1_ind == *s2_ind || *s1_ond == *s2_ond ||
+              *s1_step <= 0 || *s2_step <= 0)
+            *err_code += 1000; // trap
+          if ((*s1_step != dim_in[(*s1_ind)] && *s1_ind != *minor_in - 1 &&
+               *s1_ond != *minor_out - 1) ||
+              (*s2_step != dim_in[(*s2_ind)] && *s2_ind != *minor_in - 1 &&
+               *s2_ond != *minor_out - 1))
+            *err_code += 500; // trap
+          if ((_vol_minor * *s1_step * *s2_step) / (*s1_dim * *s2_dim) >
+              TENS_TRANSP_BUF_SIZE)
+            *err_code += 100; // trap
+        }                     // endif: non-trivial permutation
+      } else {
+        *err_code = 1 + 2 * blockDim_x % warpSize;
+      }
+    } // endif: Master thread.
+    item.barrier(cl::sycl::access::fence_space::local_space);
+
+    // Proceed:
+    if (*err_code == 0) {
+      if (*s1_ind > dim_num) { // tag of a trivial permutation
+                               // Direct copy:
+        _vol = *vol;
+        j = item.get_global_range(0);
+        i = item.get_global_id(0);
+        _addr_in = _vol - _vol % j;
+        for (_addr = 0; _addr < _addr_in; _addr += j) {
+          _addr_out = _addr + i;
+          auto real_part = tens_in_real[_addr_out];
+          auto imag_part = tens_in_real[_addr_out + _vol];
+          tens_out[_addr_out] = T{real_part, imag_part};
+        }
+        _addr_out = _addr_in + i;
+        if (_addr_out < _vol) {
+          auto real_part = tens_in_real[_addr_out];
+          auto imag_part = tens_in_real[_addr_out + _vol];
+          tens_out[_addr_out] = T{real_part, imag_part};
+        }
+      } else {                      // non-trivial permutation
+        l = threadIdx_x / warpSize; // l: warp number
+        // Distribute work accross CUDA blocks (external multi-index +
+        // splitting):
+        for (_work_piece = blockIdx_x; _work_piece < *vol_ext * *ns1 * *ns2;
+             _work_piece += gridDim_x) { //(ns1*ns2*vol_ext)
+          // is the total number of independent tasks
+          _addr = _work_piece;
+          _addr /= *vol_ext;
+          _vol = _work_piece - _addr * *vol_ext;
+          _s2 = (int)(_addr / *ns1);
+          _s1 = (int)(_addr - _s2 * *ns1); //{_addr_ext,_s1,_s2} --> tensor
+                                           //subblock (CUDA block)
+          //  Modify dimension extents due to possible dimension splitting:
+          if (threadIdx_x == 0) {
+            if (_s1 + 1 == *ns1) { // last segment of the 1st split index
+              j = *s1_dim - _s1 * *s1_step;
+              dim_in[(*s1_ind)] = j;
+              dim_out[(*s1_ond)] = j;
+            } else { // internal segment of the 1st split index
+              dim_in[(*s1_ind)] = *s1_step;
+              dim_out[(*s1_ond)] = *s1_step;
+            }
+            if (_s2 + 1 == *ns2) { // last segment of the 2nd split index
+              j = *s2_dim - _s2 * *s2_step;
+              dim_in[(*s2_ind)] = j;
+              dim_out[(*s2_ond)] = j;
+            } else { // internal segment of the 2nd split index
+              dim_in[(*s2_ind)] = *s2_step;
+              dim_out[(*s2_ond)] = *s2_step;
+            }
+            j = 1;
+            for (i = 0; i < *minor; i++) {
+              tmp0[i] = j;
+              j *= dim_in[i];
+            } // minor buffer bases (pri-old)
+            for (i = 0; i < *minor; i++)
+              n2o[i] = tmp0[pri[i]]; // look up table to accelerate further
+                                     // accesses to tmp0[]
+          }
+          item.barrier(cl::sycl::access::fence_space::local_space);
+          //  Mount input/output volumes and bases:
+          _vol_in = dim_in[0];
+          for (i = 1; i < *minor_in; i++) {
+            _vol_in *= dim_in[i];
+          }
+          _vol_out = dim_out[0];
+          for (i = 1; i < *minor_out; i++) {
+            _vol_out *= dim_out[i];
+          }
+          _vol_minor = _vol_out;
+          for (i = *minor_out; i < *minor; i++) {
+            _vol_minor *= dim_out[i];
+          }
+          _addr_in = (_s1 * *s1_step) * base_in[(*s1_ind)] +
+                     (_s2 * *s2_step) * base_in[(*s2_ind)];
+          _addr_out = _vol;
+          for (i = *minor; i < dim_num; i++) {
+            _addr = _vol / dim_in[i];
+            _addr_in += (_vol - _addr * dim_in[i]) * base_in[i];
+            _vol = _addr;
+          }
+          _vol = _addr_out;
+          _addr_out = (_s1 * *s1_step) * base_out[(*s1_ond)] +
+                      (_s2 * *s2_step) * base_out[(*s2_ond)];
+          for (i = *minor; i < dim_num; i++) {
+            _addr = _vol / dim_out[i];
+            _addr_out += (_vol - _addr * dim_out[i]) * base_out[i];
+            _vol = _addr;
+          }
+          if (_vol_out > TENS_TRANSP_TAB_SIZE ||
+              _vol_minor > _vol_in * TENS_TRANSP_TAB_SIZE ||
+              _vol_minor > _vol_out * TENS_TRANSP_TAB_SIZE) {
+            //  Algorithm 0 (slower):
+            //   Read the minor volume into the buffer from the input tensor
+            //   block:
+            _vol_minor /= _vol_in; // vol_in_c
+            _s1 = 1 +
+                  (_vol_in - 1) / warpSize; // number of warps (lines)
+                                            // whichfully cover the input volume
+            _s2 = blockDim_x / warpSize;    // number of whole warps in a thread
+                                            // block (each warp treats one line)
+            for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
+              m = j / _s1;
+              _addr = _addr_in;
+              n = m; // n: Input column number (in_c)
+              for (i = *minor_in; i < *minor; i++) {
+                k = m / dim_in[i];
+                _addr += (m - k * dim_in[i]) * base_in[i];
                 m = k;
               }
-              tens_out[_addr] = buf0[_vol_in];
+              //    m=(j%_s1)*warpSize+threadIdx.x%warpSize; //elemental offset
+              //    in the input volume
+              m = threadIdx_x +
+                  (j - n * _s1 - l) * warpSize; // elemental offset in the input
+                                                // volume (alternative)
+              if (m < _vol_in) {
+                auto real_part = tens_in_real[_addr + m];
+                auto imag_part = tens_in_real[_addr + m + _vol];
+                buf0[n * _vol_in + m] = T{real_part, imag_part};
+              }
             }
-          }
-          item_ct.barrier();
-        } else {
-          //  Algorithm 1 (presumably faster):
-          //   Create per-block look-up tables:
-          m = _vol_minor / _vol_in; // vol_in_c
-          for (j = threadIdx_x; j < m; j += blockDim_x) { // column number (input)
-            _addr = 0;
-            _s1 = j;
-            //    for(i=minor_in;i<minor;i++){_addr+=(_s1%dim_in[i])*base_in[i];
-            //    _s1/=dim_in[i];}
-            for (i = *minor_in; i < *minor; i++) {
-              _s2 = _s1 / dim_in[i];
-              _addr += (_s1 - _s2 * dim_in[i]) * base_in[i];
-              _s1 = _s2;
+            item.barrier(cl::sycl::access::fence_space::local_space);
+            //   Write the minor volume from the buffer into the output tensor
+            //   block:
+            _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
+            _s1 =
+                1 + (_vol_out - 1) / warpSize; // number of warps (lines) which
+                                               // fully cover the output volume
+            for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
+              n = j / _s1;
+              _addr = _addr_out;
+              _vol = n;
+              _vol_in = 0; //_vol: Output column number (out_c)
+              //    for(i=minor_out;i<minor;i++){m=n%dim_out[i]; n/=dim_out[i];
+              //    _addr+=m*base_out[i]; _vol_in+=m*tmp0[pri[i]];}
+              for (i = *minor_out; i < *minor; i++) {
+                k = n / dim_out[i];
+                m = n - k * dim_out[i];
+                n = k;
+                _addr += m * base_out[i];
+                _vol_in += m * n2o[i];
+              }
+              //    m=(j%_s1)*warpSize+threadIdx.x%warpSize; //elemental offset
+              //    in the output volume
+              m = threadIdx_x + (j - (int)_vol * _s1 - l) *
+                                    warpSize; // elemental offset in the output
+                                              // volume (alternative)
+              if (m < _vol_out) {
+                _addr += m;
+                //     for(i=0;i<minor_out;i++){_vol_in+=(m%dim_out[i])*tmp0[pri[i]];
+                //     m/=dim_out[i];}
+                for (i = 0; i < *minor_out; i++) {
+                  k = m / dim_out[i];
+                  _vol_in += (m - k * dim_out[i]) * n2o[i];
+                  m = k;
+                }
+                tens_out[_addr] = buf0[_vol_in];
+              }
             }
-            ftb[j] = _addr;
-          }
-          m = _vol_minor / _vol_out; // vol_out_c
-          for (j = threadIdx_x; j < m;
-               j += blockDim_x) { // column number (output)
-            _addr = 0;
-            _s1 = j;
-            //    for(i=minor_out;i<minor;i++){_addr+=(_s1%dim_out[i])*base_out[i];
-            //    _s1/=dim_out[i];}
-            for (i = *minor_out; i < *minor; i++) {
-              _s2 = _s1 / dim_out[i];
-              _addr += (_s1 - _s2 * dim_out[i]) * base_out[i];
-              _s1 = _s2;
+            item.barrier(cl::sycl::access::fence_space::local_space);
+          } else {
+            //  Algorithm 1 (presumably faster):
+            //   Create per-block look-up tables:
+            m = _vol_minor / _vol_in; // vol_in_c
+            for (j = threadIdx_x; j < m;
+                 j += blockDim_x) { // column number (input)
+              _addr = 0;
+              _s1 = j;
+              //    for(i=minor_in;i<minor;i++){_addr+=(_s1%dim_in[i])*base_in[i];
+              //    _s1/=dim_in[i];}
+              for (i = *minor_in; i < *minor; i++) {
+                _s2 = _s1 / dim_in[i];
+                _addr += (_s1 - _s2 * dim_in[i]) * base_in[i];
+                _s1 = _s2;
+              }
+              ftb[j] = _addr;
             }
-            gtb[j] = _addr;
-          }
-          for (j = threadIdx_x; j < m; j += blockDim_x) { // column number (output)
-            n = 0;
-            _s1 = j;
-            //    for(i=minor_out;i<minor;i++){n+=(_s1%dim_out[i])*n2o[i];
-            //    _s1/=dim_out[i];}
-            for (i = *minor_out; i < *minor; i++) {
-              _s2 = _s1 / dim_out[i];
-              n += (_s1 - _s2 * dim_out[i]) * n2o[i];
-              _s1 = _s2;
+            m = _vol_minor / _vol_out; // vol_out_c
+            for (j = threadIdx_x; j < m;
+                 j += blockDim_x) { // column number (output)
+              _addr = 0;
+              _s1 = j;
+              //    for(i=minor_out;i<minor;i++){_addr+=(_s1%dim_out[i])*base_out[i];
+              //    _s1/=dim_out[i];}
+              for (i = *minor_out; i < *minor; i++) {
+                _s2 = _s1 / dim_out[i];
+                _addr += (_s1 - _s2 * dim_out[i]) * base_out[i];
+                _s1 = _s2;
+              }
+              gtb[j] = _addr;
             }
-            htb[j] = n;
-          }
-          for (j = threadIdx_x; j < _vol_out; j += blockDim_x) {
-            n = 0;
-            _s1 = j;
-            //    for(i=0;i<minor_out;i++){n+=(_s1%dim_out[i])*n2o[i];
-            //    _s1/=dim_out[i];}
-            for (i = 0; i < *minor_out; i++) {
-              _s2 = _s1 / dim_out[i];
-              n += (_s1 - _s2 * dim_out[i]) * n2o[i];
-              _s1 = _s2;
+            for (j = threadIdx_x; j < m;
+                 j += blockDim_x) { // column number (output)
+              n = 0;
+              _s1 = j;
+              //    for(i=minor_out;i<minor;i++){n+=(_s1%dim_out[i])*n2o[i];
+              //    _s1/=dim_out[i];}
+              for (i = *minor_out; i < *minor; i++) {
+                _s2 = _s1 / dim_out[i];
+                n += (_s1 - _s2 * dim_out[i]) * n2o[i];
+                _s1 = _s2;
+              }
+              htb[j] = n;
             }
-            stb[j] = n;
-          }
-          item_ct.barrier();
-          //   Read the minor volume into the buffer from the input tensor block:
-          _vol_minor /= _vol_in;              // vol_in_c
-          _s1 = 1 + (_vol_in - 1) / warpSize; // number of warps (lines) which fully cover the input volume
-          _s2 = blockDim_x / warpSize; // number of whole warps in a thread block (each warp treats one line)
-          for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
-            m = j / _s1;
-            n = threadIdx_x + (j - m * _s1 - l) * warpSize; // m: Input column number (in_c); n: Offset in the column
-            if (n < _vol_in) {
-              _addr = _addr_in + ftb[m] + n;
-              auto real_part = tens_in_real[_addr];
-              auto imag_part = tens_in_real[_addr + _vol];
-              buf0[m * _vol_in + n] = T{real_part, imag_part};
+            for (j = threadIdx_x; j < _vol_out; j += blockDim_x) {
+              n = 0;
+              _s1 = j;
+              //    for(i=0;i<minor_out;i++){n+=(_s1%dim_out[i])*n2o[i];
+              //    _s1/=dim_out[i];}
+              for (i = 0; i < *minor_out; i++) {
+                _s2 = _s1 / dim_out[i];
+                n += (_s1 - _s2 * dim_out[i]) * n2o[i];
+                _s1 = _s2;
+              }
+              stb[j] = n;
             }
-          }
-          item_ct.barrier();
-          //   Write the minor volume from the buffer into the output tensor block:
-          _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
-          _s1 = 1 + (_vol_out - 1) / warpSize; // number of warps (lines) which fully cover the output volume
-          for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
-            m = j / _s1;
-            n = threadIdx_x + (j - m * _s1 - l) * warpSize; // m: Output column number
-	    // (out_c); n: Offset in the column
-            if (n < _vol_out) {
-              _addr = _addr_out + gtb[m] + n;
-              _vol_in = htb[m] + stb[n];
-              tens_out[_addr] = buf0[_vol_in];
+            item.barrier(cl::sycl::access::fence_space::local_space);
+            //   Read the minor volume into the buffer from the input tensor
+            //   block:
+            _vol_minor /= _vol_in;              // vol_in_c
+            _s1 = 1 + (_vol_in - 1) / warpSize; // number of warps (lines) which
+                                                // fully cover the input volume
+            _s2 = blockDim_x / warpSize; // number of whole warps in a thread
+                                         // block (each warp treats one line)
+            for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
+              m = j / _s1;
+              n = threadIdx_x + (j - m * _s1 - l) *
+                                    warpSize; // m: Input column number (in_c);
+                                              // n: Offset in the column
+              if (n < _vol_in) {
+                _addr = _addr_in + ftb[m] + n;
+                auto real_part = tens_in_real[_addr];
+                auto imag_part = tens_in_real[_addr + _vol];
+                buf0[m * _vol_in + n] = T{real_part, imag_part};
+              }
             }
+            item.barrier(cl::sycl::access::fence_space::local_space);
+            //   Write the minor volume from the buffer into the output tensor
+            //   block:
+            _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
+            _s1 =
+                1 + (_vol_out - 1) / warpSize; // number of warps (lines) which
+                                               // fully cover the output volume
+            for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
+              m = j / _s1;
+              n = threadIdx_x +
+                  (j - m * _s1 - l) * warpSize; // m: Output column number
+              // (out_c); n: Offset in the column
+              if (n < _vol_out) {
+                _addr = _addr_out + gtb[m] + n;
+                _vol_in = htb[m] + stb[n];
+                tens_out[_addr] = buf0[_vol_in];
+              }
+            }
+            item.barrier(cl::sycl::access::fence_space::local_space);
           }
-          item_ct.barrier();
-        }
-      } // enddo _work_piece: independent work distribution among thread blocks
-    }
+        } // enddo _work_piece: independent work distribution among thread
+          // blocks
+      }
   }
   // Record errors if occured (for each block):
   if (threadIdx_x == 0) {
     if (*err_code != 0)
-      i = atomic_ref<T>( gpu_error_count ).fetch_add(1);
+      i = atomic_ref<int>(gpu_error_count).fetch_add(1);
   }
   return;
 }
@@ -3246,7 +3310,7 @@ template <typename T>
 void gpu_tensor_block_copy_cmplx_split_out_dlf__(
     int dmo, int drc, int dim_num, int const_args_pos,
     const T *__restrict__ tens_in, T *__restrict__ tens_out,
-    sycl::nd_item<3> item_ct,
+    sycl::nd_item<3> item,
     dpct::accessor<int, dpct::device, 2> const_args_dims,
     dpct::accessor<int, dpct::device, 2> const_args_prmn, int *gpu_error_count,
     T *buf0, float *val, size_t *base_in, size_t *base_out, size_t *ftb,
@@ -3270,661 +3334,717 @@ NOTES:
 # Number of threads per block must be multiple of the warpSize!
 **/
 {
-  size_t threadIdx_x = item_ct.get_local_id(2);
-  size_t blockDim_x = item_ct.get_local_range(2);
-  size_t gridDim_x = item_ct.get_group_range(2);
-  size_t blockIdx_x = item_ct.get_group(2);
+    size_t threadIdx_x = item.get_local_id(2);
+    size_t blockDim_x = item.get_local_range(2);
+    size_t gridDim_x = item.get_group_range(2);
+    size_t blockIdx_x = item.get_group(2);
 
-  size_t _vol, _addr_in, _addr_out, _addr, _work_piece;
-  int i, j, k, l, m, n, _vol_minor, _vol_in, _vol_out, _s1, _s2;
-  /*
-    SHARED MEMORY USE (bytes) =
-    + TENS_TRANSP_BUF_SIZE*sizeof(T)
-    + MAX_TENSOR_RANK*(8+8+4+4+4+4+4+4)
-    + TENS_TRANSP_TAB_SIZE*(8+8+4+4)
-    + 4*15 + 8*2
-    MIN REGISTER USE (bytes) per thread =
-    + 4*4 + 4*11 + 8*5 = 100
-  */
+    size_t _vol, _addr_in, _addr_out, _addr, _work_piece;
+    int i, j, k, l, m, n, _vol_minor, _vol_in, _vol_out, _s1, _s2;
+    /*
+      SHARED MEMORY USE (bytes) =
+      + TENS_TRANSP_BUF_SIZE*sizeof(T)
+      + MAX_TENSOR_RANK*(8+8+4+4+4+4+4+4)
+      + TENS_TRANSP_TAB_SIZE*(8+8+4+4)
+      + 4*15 + 8*2
+      MIN REGISTER USE (bytes) per thread =
+      + 4*4 + 4*11 + 8*5 = 100
+    */
 
-  static_assert(ComplexType<T>::valid, "Non-complex types are not allowed!");
-  typename ComplexType<T>::RealType *tens_out_real =
-      (typename ComplexType<T>::RealType *)tens_out;
-  // Determine the minor index set (only the master thread in each thread block):
-  if (threadIdx_x == 0) {
-    *err_code = 0;
-    if (dim_num >= 0 && dim_num <= MAX_TENSOR_RANK && blockDim_x >= warpSize &&
-        blockDim_x % warpSize == 0) {
-      *s1_ind = dim_num + 1;
-      *s2_ind = dim_num - 1;
-      _vol = 1;
-      for (i = 0; i < dim_num; i++) {
-        _vol *= const_args_dims[const_args_pos][i];
-        if (const_args_prmn[const_args_pos][i] != i + 1)
-          *s1_ind = 0;
-      };
-      *vol = _vol; // total volume
-      // (number of tensor elements)
-      if (*s1_ind == 0) { // non-trivial permutation
-        // Set input/output permutations and dimension extents:
-        if (drc == 0) { // normal index permutation
-          for (i = 0; i < dim_num; i++)
-            o2n[i] = const_args_prmn[const_args_pos][i] - 1;
-          for (i = 0; i < dim_num; i++)
-            n2o[o2n[i]] = i;
-        } else { // inversed index permutation
-          for (i = 0; i < dim_num; i++)
-            n2o[i] = const_args_prmn[const_args_pos][i] - 1;
-          for (i = 0; i < dim_num; i++)
-            o2n[n2o[i]] = i;
-        }
-        if (dmo == 0) { // normal dimension order
-          for (i = 0; i < dim_num; i++)
-            dim_in[i] = const_args_dims[const_args_pos][i];
-          for (i = 0; i < dim_num; i++)
-            dim_out[o2n[i]] = dim_in[i];
-        } else { // inversed dimension order
-          for (i = 0; i < dim_num; i++)
-            dim_out[i] = const_args_dims[const_args_pos][i];
-          for (i = 0; i < dim_num; i++)
-            dim_in[n2o[i]] = dim_out[i];
-        }
-        *s1_step = dim_in[(*s1_ind)];
-        *s2_step = dim_in[(*s2_ind)];
-        if (_vol > TENS_TRANSP_BUF_SIZE) { // tensor block does not fit into the
-                                           // shared memory buffer
-          // Determine the input/output minor index sets and the combined minor
-          // index set:
-          l = (int)(cl::sycl::sqrt((float)TENS_TRANSP_BUF_SIZE));
-          *minor_in = 0;
-          _vol_in = 1;
-          for (i = 0; i < dim_num; i++) {
-            j = _vol_in * dim_in[i];
-            if (j > l)
-              break;
-            (*minor_in)++;
-            _vol_in = j;
+    static_assert(ComplexType<T>::valid, "Non-complex types are not allowed!");
+    typename ComplexType<T>::RealType *tens_out_real =
+        (typename ComplexType<T>::RealType *)tens_out;
+    // Determine the minor index set (only the master thread in each thread
+    // block):
+    if (threadIdx_x == 0) {
+      *err_code = 0;
+      if (dim_num >= 0 && dim_num <= MAX_TENSOR_RANK &&
+          blockDim_x >= warpSize && blockDim_x % warpSize == 0) {
+        *s1_ind = dim_num + 1;
+        *s2_ind = dim_num - 1;
+        _vol = 1;
+        for (i = 0; i < dim_num; i++) {
+          _vol *= const_args_dims[const_args_pos][i];
+          if (const_args_prmn[const_args_pos][i] != i + 1)
+            *s1_ind = 0;
+        };
+        *vol = _vol; // total volume
+        // (number of tensor elements)
+        if (*s1_ind == 0) { // non-trivial permutation
+          // Set input/output permutations and dimension extents:
+          if (drc == 0) { // normal index permutation
+            for (i = 0; i < dim_num; i++)
+              o2n[i] = const_args_prmn[const_args_pos][i] - 1;
+            for (i = 0; i < dim_num; i++)
+              n2o[o2n[i]] = i;
+          } else { // inversed index permutation
+            for (i = 0; i < dim_num; i++)
+              n2o[i] = const_args_prmn[const_args_pos][i] - 1;
+            for (i = 0; i < dim_num; i++)
+              o2n[n2o[i]] = i;
           }
-          *minor_out = 0;
-          _vol_out = 1;
-          for (i = 0; i < dim_num; i++) {
-            j = _vol_out * dim_out[i];
-            if (j > l)
-              break;
-            (*minor_out)++;
-            _vol_out = j;
+          if (dmo == 0) { // normal dimension order
+            for (i = 0; i < dim_num; i++)
+              dim_in[i] = const_args_dims[const_args_pos][i];
+            for (i = 0; i < dim_num; i++)
+              dim_out[o2n[i]] = dim_in[i];
+          } else { // inversed dimension order
+            for (i = 0; i < dim_num; i++)
+              dim_out[i] = const_args_dims[const_args_pos][i];
+            for (i = 0; i < dim_num; i++)
+              dim_in[n2o[i]] = dim_out[i];
           }
-          *minor = *minor_in;
-          _vol_minor = _vol_in;
-          for (i = 0; i < *minor_out; i++) {
-            if (n2o[i] >= *minor_in) {
-              (*minor)++;
-              _vol_minor *= dim_out[i];
-            }
-          }
-          m = 1;
-          _s1 = 0;
-          _s2 = 0;
-          while (_vol_minor < TENS_TRANSP_BUF_SIZE && m != 0) {
-            m = 0;
-            if (_s1 == 0) {
-              for (i = *minor_in; i < dim_num; i++) {
-                if (o2n[i] < *minor_out) {
-                  (*minor_in)++;
-                  _vol_in *= dim_in[i];
-                } else {
-                  break;
-                }
-              }
-            }
-            if (_s2 == 0) {
-              for (i = *minor_out; i < dim_num; i++) {
-                if (n2o[i] < *minor_in) {
-                  (*minor_out)++;
-                  _vol_out *= dim_out[i];
-                } else {
-                  break;
-                }
-              }
-            }
-            j = dim_in[(*minor_in)];
-            l = dim_out[(*minor_out)];
-            if (*minor_in == n2o[(*minor_out)] &&
-                _s1 + _s2 == 0) { // same candidate index to both the input and output index sets
-              if (j > 1 && TENS_TRANSP_BUF_SIZE < _vol_minor * 2)
+          *s1_step = dim_in[(*s1_ind)];
+          *s2_step = dim_in[(*s2_ind)];
+          if (_vol > TENS_TRANSP_BUF_SIZE) { // tensor block does not fit into
+                                             // the shared memory buffer
+            // Determine the input/output minor index sets and the combined
+            // minor index set:
+            l = (int)(cl::sycl::sqrt((float)TENS_TRANSP_BUF_SIZE));
+            *minor_in = 0;
+            _vol_in = 1;
+            for (i = 0; i < dim_num; i++) {
+              j = _vol_in * dim_in[i];
+              if (j > l)
                 break;
-              if (_vol_minor * j > TENS_TRANSP_BUF_SIZE) {
-                *s1_ind = *minor_in;
-                *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                _s1++;
-                _s2++;
-              }
               (*minor_in)++;
-              _vol_in *= j;
+              _vol_in = j;
+            }
+            *minor_out = 0;
+            _vol_out = 1;
+            for (i = 0; i < dim_num; i++) {
+              j = _vol_out * dim_out[i];
+              if (j > l)
+                break;
               (*minor_out)++;
-              _vol_out *= j;
-              (*minor)++;
-              _vol_minor *= j;
-              m++;
-            } else { // the input and output index sets consider two different candidates
-              if (_vol_minor * j * l <= TENS_TRANSP_BUF_SIZE &&
-                  _s1 + _s2 == 0) { // accept both, no splitting
+              _vol_out = j;
+            }
+            *minor = *minor_in;
+            _vol_minor = _vol_in;
+            for (i = 0; i < *minor_out; i++) {
+              if (n2o[i] >= *minor_in) {
+                (*minor)++;
+                _vol_minor *= dim_out[i];
+              }
+            }
+            m = 1;
+            _s1 = 0;
+            _s2 = 0;
+            while (_vol_minor < TENS_TRANSP_BUF_SIZE && m != 0) {
+              m = 0;
+              if (_s1 == 0) {
+                for (i = *minor_in; i < dim_num; i++) {
+                  if (o2n[i] < *minor_out) {
+                    (*minor_in)++;
+                    _vol_in *= dim_in[i];
+                  } else {
+                    break;
+                  }
+                }
+              }
+              if (_s2 == 0) {
+                for (i = *minor_out; i < dim_num; i++) {
+                  if (n2o[i] < *minor_in) {
+                    (*minor_out)++;
+                    _vol_out *= dim_out[i];
+                  } else {
+                    break;
+                  }
+                }
+              }
+              j = dim_in[(*minor_in)];
+              l = dim_out[(*minor_out)];
+              if (*minor_in == n2o[(*minor_out)] &&
+                  _s1 + _s2 == 0) { // same candidate index to both the input
+                                    // and output index sets
+                if (j > 1 && TENS_TRANSP_BUF_SIZE < _vol_minor * 2)
+                  break;
+                if (_vol_minor * j > TENS_TRANSP_BUF_SIZE) {
+                  *s1_ind = *minor_in;
+                  *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
+                  _s1++;
+                  _s2++;
+                }
                 (*minor_in)++;
                 _vol_in *= j;
                 (*minor_out)++;
-                _vol_out *= l;
-                *minor += 2;
-                _vol_minor *= (j * l);
+                _vol_out *= j;
+                (*minor)++;
+                _vol_minor *= j;
                 m++;
-              } else { // try to accept either one of the two OR both with splitting
-                if (j == 1 || l == 1) {
-                  if (j == 1 && _s1 == 0) {
-                    (*minor_in)++;
-                    (*minor)++;
-                    m++;
-                  }
-                  if (l == 1 && _s2 == 0) {
-                    (*minor_out)++;
-                    (*minor)++;
-                    m++;
-                  }
-                } else {
-                  if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
-                      _vol_minor * l > TENS_TRANSP_BUF_SIZE &&
-                      _vol_out >= warpSize && _s1 == 0) { // accept the input index, no splitting
-                    (*minor_in)++;
-                    _vol_in *= j;
-                    (*minor)++;
-                    _vol_minor *= j;
-                    m++;
-                  } else if (_vol_minor * j > TENS_TRANSP_BUF_SIZE &&
-                             _vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
-                             _vol_in >= warpSize && _s2 == 0) { // accept the output index, no splitting
-                    (*minor_out)++;
-                    _vol_out *= l;
-                    (*minor)++;
-                    _vol_minor *= l;
-                    m++;
-                  } else { // splitting is unavoidable (both OR one OR none)
-                    if (TENS_TRANSP_BUF_SIZE >= _vol_minor * 2) {
-                      if (j >= 4 && l >= 4) { // dimension extents are large enough to be split
-                        if (_vol_minor * 4 >
-                            TENS_TRANSP_BUF_SIZE) { // impossible to split both indices
-                          if (_vol_in <= _vol_out && _s1 == 0) { // split the input candidate index
-                            *s1_ind = *minor_in;
-                            *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                            (*minor_in)++;
-                            _vol_in *= j;
-                            (*minor)++;
-                            _vol_minor *= j;
-                            _s1++;
-                            m++;
-                          } else { // split the output candidate index
-                            if (_s2 == 0) {
-                              *s1_ind = n2o[(*minor_out)];
+              } else { // the input and output index sets consider two different
+                       // candidates
+                if (_vol_minor * j * l <= TENS_TRANSP_BUF_SIZE &&
+                    _s1 + _s2 == 0) { // accept both, no splitting
+                  (*minor_in)++;
+                  _vol_in *= j;
+                  (*minor_out)++;
+                  _vol_out *= l;
+                  *minor += 2;
+                  _vol_minor *= (j * l);
+                  m++;
+                } else { // try to accept either one of the two OR both with
+                         // splitting
+                  if (j == 1 || l == 1) {
+                    if (j == 1 && _s1 == 0) {
+                      (*minor_in)++;
+                      (*minor)++;
+                      m++;
+                    }
+                    if (l == 1 && _s2 == 0) {
+                      (*minor_out)++;
+                      (*minor)++;
+                      m++;
+                    }
+                  } else {
+                    if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
+                        _vol_minor * l > TENS_TRANSP_BUF_SIZE &&
+                        _vol_out >= warpSize &&
+                        _s1 == 0) { // accept the input index, no splitting
+                      (*minor_in)++;
+                      _vol_in *= j;
+                      (*minor)++;
+                      _vol_minor *= j;
+                      m++;
+                    } else if (_vol_minor * j > TENS_TRANSP_BUF_SIZE &&
+                               _vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
+                               _vol_in >= warpSize &&
+                               _s2 ==
+                                   0) { // accept the output index, no splitting
+                      (*minor_out)++;
+                      _vol_out *= l;
+                      (*minor)++;
+                      _vol_minor *= l;
+                      m++;
+                    } else { // splitting is unavoidable (both OR one OR none)
+                      if (TENS_TRANSP_BUF_SIZE >= _vol_minor * 2) {
+                        if (j >= 4 && l >= 4) { // dimension extents are large
+                                                // enough to be split
+                          if (_vol_minor * 4 >
+                              TENS_TRANSP_BUF_SIZE) { // impossible to split
+                                                      // both indices
+                            if (_vol_in <= _vol_out &&
+                                _s1 == 0) { // split the input candidate index
+                              *s1_ind = *minor_in;
                               *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
+                              (*minor_in)++;
+                              _vol_in *= j;
+                              (*minor)++;
+                              _vol_minor *= j;
+                              _s1++;
+                              m++;
+                            } else { // split the output candidate index
+                              if (_s2 == 0) {
+                                *s1_ind = n2o[(*minor_out)];
+                                *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
+                                (*minor_out)++;
+                                _vol_out *= l;
+                                (*minor)++;
+                                _vol_minor *= l;
+                                _s2++;
+                                m++;
+                              }
+                            }
+                          } else { // possible to split both indices
+                            i = (int)cl::sycl::sqrt(
+                                ((float)TENS_TRANSP_BUF_SIZE) /
+                                (float)_vol_minor);
+                            if (i < 2)
+                              i = 2; // uniform splitting
+                            *s1_step = i;
+                            *s2_step = i;
+                            *val = (float)_vol_out / (float)_vol_in;
+                            if (*val < 1.0f) { // scale the initial uniform
+                                               // splitting to
+                              // reflect the disbalance between _vol_in and
+                              // _vol_out
+                              if (*val * (float)i < 1.0f)
+                                *val = 1.0f / (float)i;
+                              if (*val * (float)l < (float)i)
+                                *val = (float)i / (float)l;
+                            } else {
+                              if (*val * (float)i > (float)j)
+                                *val = (float)j / (float)i;
+                              if (*val > float(i))
+                                *val = (float)i;
+                            }
+                            *s1_step = (int)(((float)i) * *val);
+                            *s2_step = (int)(((float)i) / *val);
+                            if (*s1_step >= 2 &&
+                                _s1 == 0) { //&& s1_step <= dim_in[minor_in]
+                              *s1_ind = *minor_in;
+                              (*minor_in)++;
+                              _vol_in *= j;
+                              (*minor)++;
+                              _vol_minor *= j;
+                              _s1++;
+                              m++;
+                            } else {
+                              *s1_step = dim_in[(*s1_ind)];
+                            }
+                            if (*s2_step >= 2 &&
+                                _s2 == 0) { //&& s2_step <= dim_out[minor_out]
+                              *s2_ind = n2o[(*minor_out)];
                               (*minor_out)++;
                               _vol_out *= l;
                               (*minor)++;
                               _vol_minor *= l;
                               _s2++;
                               m++;
+                            } else {
+                              *s2_step = dim_in[(*s2_ind)];
                             }
                           }
-                        } else { // possible to split both indices
-                          i = (int)cl::sycl::sqrt( ((float)TENS_TRANSP_BUF_SIZE) / (float)_vol_minor );
-                          if (i < 2)
-                            i = 2; // uniform splitting
-                          *s1_step = i;
-                          *s2_step = i;
-                          *val = (float)_vol_out / (float)_vol_in;
-                          if (*val < 1.0f) { // scale the initial uniform splitting to
-			    // reflect the disbalance between _vol_in and _vol_out
-                            if (*val * (float)i < 1.0f)
-                              *val = 1.0f / (float)i;
-                            if (*val * (float)l < (float)i)
-                              *val = (float)i / (float)l;
-                          } else {
-                            if (*val * (float)i > (float)j)
-                              *val = (float)j / (float)i;
-                            if (*val > float(i))
-                              *val = (float)i;
-                          }
-                          *s1_step = (int)(((float)i) * *val);
-                          *s2_step = (int)(((float)i) / *val);
-                          if (*s1_step >= 2 && _s1 == 0) { //&& s1_step <= dim_in[minor_in]
-                            *s1_ind = *minor_in;
-                            (*minor_in)++;
-                            _vol_in *= j;
-                            (*minor)++;
-                            _vol_minor *= j;
-                            _s1++;
-                            m++;
-                          } else {
-                            *s1_step = dim_in[(*s1_ind)];
-                          }
-                          if (*s2_step >= 2 && _s2 == 0) { //&& s2_step <= dim_out[minor_out]
-                            *s2_ind = n2o[(*minor_out)];
-                            (*minor_out)++;
-                            _vol_out *= l;
-                            (*minor)++;
-                            _vol_minor *= l;
-                            _s2++;
-                            m++;
-                          } else {
-                            *s2_step = dim_in[(*s2_ind)];
-                          }
-                        }
-                      } else if (j >= 4 && l < 4 && _s1 == 0) { // split the input candidate index
-                        *s1_ind = *minor_in;
-                        *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                        (*minor_in)++;
-                        _vol_in *= j;
-                        (*minor)++;
-                        _vol_minor *= j;
-                        _s1++;
-                        m++;
-                      } else if (j < 4 && l >= 4 && _s2 == 0) { // split the output candidate index
-                        *s1_ind = n2o[(*minor_out)];
-                        *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
-                        (*minor_out)++;
-                        _vol_out *= l;
-                        (*minor)++;
-                        _vol_minor *= l;
-                        _s2++;
-                        m++;
-                      } else { // both candidate indices have too small extent
-                               // to be split: try to add one of them fully
-                        if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE && _s1 == 0) {
+                        } else if (j >= 4 && l < 4 &&
+                                   _s1 ==
+                                       0) { // split the input candidate index
+                          *s1_ind = *minor_in;
+                          *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
                           (*minor_in)++;
                           _vol_in *= j;
                           (*minor)++;
                           _vol_minor *= j;
+                          _s1++;
                           m++;
-                        } else if (_vol_minor * l <= TENS_TRANSP_BUF_SIZE && _s2 == 0) {
+                        } else if (j < 4 && l >= 4 &&
+                                   _s2 ==
+                                       0) { // split the output candidate index
+                          *s1_ind = n2o[(*minor_out)];
+                          *s1_step = TENS_TRANSP_BUF_SIZE / _vol_minor;
                           (*minor_out)++;
                           _vol_out *= l;
                           (*minor)++;
                           _vol_minor *= l;
+                          _s2++;
                           m++;
+                        } else { // both candidate indices have too small extent
+                                 // to be split: try to add one of them fully
+                          if (_vol_minor * j <= TENS_TRANSP_BUF_SIZE &&
+                              _s1 == 0) {
+                            (*minor_in)++;
+                            _vol_in *= j;
+                            (*minor)++;
+                            _vol_minor *= j;
+                            m++;
+                          } else if (_vol_minor * l <= TENS_TRANSP_BUF_SIZE &&
+                                     _s2 == 0) {
+                            (*minor_out)++;
+                            _vol_out *= l;
+                            (*minor)++;
+                            _vol_minor *= l;
+                            m++;
+                          }
                         }
+                      } else { // unable to add more indices in the minor set
+                        break;
                       }
-                    } else { // unable to add more indices in the minor set
-                      break;
                     }
                   }
                 }
               }
             }
+            if (*s1_ind == dim_num - 1 && *s2_ind == dim_num - 1) {
+              *s2_ind = 0;
+              *s2_step = dim_in[0];
+            }      // s1_ind was set while s2_ind was not
+          } else { // tensor block fits into the shared memory buffer from the
+                   // beginning
+            *minor = dim_num;
+            *minor_in = dim_num;
+            *minor_out = dim_num;
+            _vol_minor = _vol;
+            _vol_in = _vol;
+            _vol_out = _vol;
           }
-          if (*s1_ind == dim_num - 1 && *s2_ind == dim_num - 1) {
-            *s2_ind = 0;
-            *s2_step = dim_in[0];
-          }      // s1_ind was set while s2_ind was not
-        } else { // tensor block fits into the shared memory buffer from the beginning
-          *minor = dim_num;
-          *minor_in = dim_num;
-          *minor_out = dim_num;
-          _vol_minor = _vol;
-          _vol_in = _vol;
-          _vol_out = _vol;
-        }
-        // Share the tensor transpose configuration with other threads in each
-        // block:
-        *vol_ext = _vol / _vol_minor;
-        *s1_dim = dim_in[(*s1_ind)];
-        *s2_dim = dim_in[(*s2_ind)];
-        // Set indexing bases (OUT:{out,in_c,ext_in}_new;
-        // IN:{in,out_c,ext_in}_old):
-        //  OUTPUT indexing (dim_out[], base_out[]: prioritized new numeration):
-        for (i = 0; i < dim_num; i++) {
-          tmp0[i] = dim_out[i];
-        } // save output dimension extents (new numeration)
-        j = 0;
-        for (i = 0; i < *minor_out; i++) {
-          pri[j++] = i;
-        } // output minor index set (new numeration))
-        for (i = 0; i < dim_num; i++) {
-          if (o2n[i] >= *minor_out)
-            pri[j++] = o2n[i];
-        } //{compl.input minor + external} index set (new numeration)
-        j = 1;
-        for (i = 0; i < dim_num; i++) {
-          dim_out[i] = j;
-          j *= tmp0[i];
-        } // output bases (new numeration)
-        for (i = 0; i < dim_num; i++) {
-          base_out[i] = dim_out[pri[i]];
-        } // output bases (prioritized new numeration)
-        for (i = 0; i < dim_num; i++) {
-          dim_out[i] = tmp0[pri[i]];
-        } // output extents (prioritized new numeration)
-        for (i = 0; i < dim_num; i++) {
-          if (n2o[pri[i]] == *s1_ind) {
-            *s1_ond = i;
-          } else if (n2o[pri[i]] == *s2_ind) {
-            *s2_ond = i;
-          }
-        } // split indices (prioritized new numeration)
-        //  INPUT indexing (dim_in[], base_in[]: prioritized old numeration):
-        for (i = 0; i < dim_num; i++) {
-          tmp0[i] = dim_in[i];
-        } // save input dimension extents (old numeration)
-        j = 0;
-        for (i = 0; i < *minor_in; i++) {
-          pri[j++] = i;
-        } // input minor index set (old numeration)
-        for (i = 0; i < *minor_out; i++) {
-          if (n2o[i] >= *minor_in)
-            pri[j++] = n2o[i];
-        } // compl.output minor idex set (old numeration)
-        for (i = j; i < dim_num; i++) {
-          pri[i] = n2o[pri[i]];
-        } // external index set (just convert new numbers to old ones for
-          // consistency)
-        j = 1;
-        for (i = 0; i < dim_num; i++) {
-          dim_in[i] = j;
-          j *= tmp0[i];
-        } // input bases (old numeration)
-        for (i = 0; i < dim_num; i++) {
-          base_in[i] = dim_in[pri[i]];
-        } // input bases (prioritized old numeration)
-        for (i = 0; i < dim_num; i++) {
-          dim_in[i] = tmp0[pri[i]];
-        } // input extents (prioritized old numeration)
-        for (i = 0; i < dim_num; i++) {
-          if (pri[i] == *s1_ind) {
-            _s1 = i;
-          } else if (pri[i] == *s2_ind) {
-            _s2 = i;
-          }
-        } // split indices (prioritized old numeration)
-        *s1_ind = _s1;
-        *s2_ind = _s2;
-        *ns1 = 1 + (*s1_dim - 1) / *s1_step; // number of segments from the 1st split minor index
-        *ns2 = 1 + (*s2_dim - 1) / *s2_step; // number of segments from the 2nd split minor index
-        //  Index position correspondence for the minor index set (pri-new --> pri-old):
-        j = 0;
-        for (i = 0; i < *minor_out; i++) {
-          if (n2o[i] < *minor_in) {
-            pri[i] = n2o[i];
-          } else {
-            pri[i] = (*minor_in + j);
-            j++;
-          }
-        }
-        j = 0;
-        for (i = 0; i < *minor_in; i++) {
-          if (o2n[i] < *minor_out) {
-            pri[o2n[i]] = i;
-          } else {
-            pri[*minor_out + j] = i;
-            j++;
-          }
-        }
-        // Check tensor transpose configuration parameters:
-        if (*minor <= 0 || *minor_in <= 0 || *minor_out <= 0 || _vol <= 0 || _vol_minor <= 0)
-          *err_code += 5000; // trap
-        if (*s1_ind >= dim_num || *s2_ind >= dim_num || *s1_ond >= dim_num ||
-            *s2_ond >= dim_num || *s1_ind == *s2_ind || *s1_ond == *s2_ond ||
-            *s1_step <= 0 || *s2_step <= 0)
-          *err_code += 1000; // trap
-        if ((*s1_step != dim_in[(*s1_ind)] && *s1_ind != *minor_in - 1 && *s1_ond != *minor_out - 1) ||
-            (*s2_step != dim_in[(*s2_ind)] && *s2_ind != *minor_in - 1 && *s2_ond != *minor_out - 1))
-          *err_code += 500; // trap
-        if ((_vol_minor * *s1_step * *s2_step) / (*s1_dim * *s2_dim) > TENS_TRANSP_BUF_SIZE)
-          *err_code += 100; // trap
-      }                     // endif: non-trivial permutation
-    } else {
-      *err_code = 1 + 2 * blockDim_x % warpSize;
-    }
-  } // endif: Master thread.
-  item_ct.barrier();
-
-  // Proceed:
-  if (*err_code == 0) {
-    if (*s1_ind > dim_num) { // tag of a trivial permutation
-                             // Direct copy:
-      _vol = *vol;
-      j = item_ct.get_global_range(2);
-      i = item_ct.get_global_id(2);
-      _addr_in = _vol - _vol % j;
-      for (_addr = 0; _addr < _addr_in; _addr += j) {
-        _addr_out = _addr + i;
-        auto cmplx_val = tens_in[_addr_out];
-        tens_out_real[_addr_out] = talshComplexReal(cmplx_val);
-        tens_out_real[_addr_out + _vol] = talshComplexImag(cmplx_val);
-      }
-      _addr_out = _addr_in + i;
-      if (_addr_out < _vol) {
-        auto cmplx_val = tens_in[_addr_out];
-        tens_out_real[_addr_out] = talshComplexReal(cmplx_val);
-        tens_out_real[_addr_out + _vol] = talshComplexImag(cmplx_val);
-      }
-    } else {                      // non-trivial permutation
-      l = threadIdx_x / warpSize; // l: warp number
-      // Distribute work accross CUDA blocks (external multi-index + splitting):
-      for (_work_piece = blockIdx_x; _work_piece < *vol_ext * *ns1 * *ns2; _work_piece += gridDim_x) { //(ns1*ns2*vol_ext) is the total number of independent tasks
-        _addr = _work_piece;
-        _addr /= *vol_ext;
-        _vol = _work_piece - _addr * *vol_ext;
-        _s2 = (int)(_addr / *ns1);
-        _s1 = (int)(_addr - _s2 * *ns1); //{_addr_ext,_s1,_s2} --> tensor
-                                         //subblock (CUDA block)
-        //  Modify dimension extents due to possible dimension splitting:
-        if (threadIdx_x == 0) {
-          if (_s1 + 1 == *ns1) { // last segment of the 1st split index
-            j = *s1_dim - _s1 * *s1_step;
-            dim_in[(*s1_ind)] = j;
-            dim_out[(*s1_ond)] = j;
-          } else { // internal segment of the 1st split index
-            dim_in[(*s1_ind)] = *s1_step;
-            dim_out[(*s1_ond)] = *s1_step;
-          }
-          if (_s2 + 1 == *ns2) { // last segment of the 2nd split index
-            j = *s2_dim - _s2 * *s2_step;
-            dim_in[(*s2_ind)] = j;
-            dim_out[(*s2_ond)] = j;
-          } else { // internal segment of the 2nd split index
-            dim_in[(*s2_ind)] = *s2_step;
-            dim_out[(*s2_ond)] = *s2_step;
-          }
+          // Share the tensor transpose configuration with other threads in each
+          // block:
+          *vol_ext = _vol / _vol_minor;
+          *s1_dim = dim_in[(*s1_ind)];
+          *s2_dim = dim_in[(*s2_ind)];
+          // Set indexing bases (OUT:{out,in_c,ext_in}_new;
+          // IN:{in,out_c,ext_in}_old):
+          //  OUTPUT indexing (dim_out[], base_out[]: prioritized new
+          //  numeration):
+          for (i = 0; i < dim_num; i++) {
+            tmp0[i] = dim_out[i];
+          } // save output dimension extents (new numeration)
+          j = 0;
+          for (i = 0; i < *minor_out; i++) {
+            pri[j++] = i;
+          } // output minor index set (new numeration))
+          for (i = 0; i < dim_num; i++) {
+            if (o2n[i] >= *minor_out)
+              pri[j++] = o2n[i];
+          } //{compl.input minor + external} index set (new numeration)
           j = 1;
-          for (i = 0; i < *minor; i++) {
-            tmp0[i] = j;
-            j *= dim_in[i];
-          } // minor buffer bases (pri-old)
-          for (i = 0; i < *minor; i++)
-            n2o[i] = tmp0[pri[i]]; // look up table to accelerate further
-                                   // accesses to tmp0[]
-        }
-        item_ct.barrier();
-        //  Mount input/output volumes and bases:
-        _vol_in = dim_in[0];
-        for (i = 1; i < *minor_in; i++) {
-          _vol_in *= dim_in[i];
-        }
-        _vol_out = dim_out[0];
-        for (i = 1; i < *minor_out; i++) {
-          _vol_out *= dim_out[i];
-        }
-        _vol_minor = _vol_out;
-        for (i = *minor_out; i < *minor; i++) {
-          _vol_minor *= dim_out[i];
-        }
-        _addr_in = (_s1 * *s1_step) * base_in[(*s1_ind)] + (_s2 * *s2_step) * base_in[(*s2_ind)];
-        _addr_out = _vol;
-        for (i = *minor; i < dim_num; i++) {
-          _addr = _vol / dim_in[i];
-          _addr_in += (_vol - _addr * dim_in[i]) * base_in[i];
-          _vol = _addr;
-        }
-        _vol = _addr_out;
-        _addr_out = (_s1 * *s1_step) * base_out[(*s1_ond)] + (_s2 * *s2_step) * base_out[(*s2_ond)];
-        for (i = *minor; i < dim_num; i++) {
-          _addr = _vol / dim_out[i];
-          _addr_out += (_vol - _addr * dim_out[i]) * base_out[i];
-          _vol = _addr;
-        }
-        if (_vol_out > TENS_TRANSP_TAB_SIZE ||
-            _vol_minor > _vol_in * TENS_TRANSP_TAB_SIZE ||
-            _vol_minor > _vol_out * TENS_TRANSP_TAB_SIZE) {
-          //  Algorithm 0 (slower):
-          //   Read the minor volume into the buffer from the input tensor
-          //   block:
-          _vol_minor /= _vol_in;              // vol_in_c
-          _s1 = 1 + (_vol_in - 1) / warpSize; // number of warps (lines) which fully cover the input volume
-          _s2 = blockDim_x / warpSize; // number of whole warps in a thread block (each warp treats one line)
-          for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
-            m = j / _s1;
-            _addr = _addr_in;
-            n = m; // n: Input column number (in_c)
-            for (i = *minor_in; i < *minor; i++) {
-              k = m / dim_in[i];
-              _addr += (m - k * dim_in[i]) * base_in[i];
-              m = k;
+          for (i = 0; i < dim_num; i++) {
+            dim_out[i] = j;
+            j *= tmp0[i];
+          } // output bases (new numeration)
+          for (i = 0; i < dim_num; i++) {
+            base_out[i] = dim_out[pri[i]];
+          } // output bases (prioritized new numeration)
+          for (i = 0; i < dim_num; i++) {
+            dim_out[i] = tmp0[pri[i]];
+          } // output extents (prioritized new numeration)
+          for (i = 0; i < dim_num; i++) {
+            if (n2o[pri[i]] == *s1_ind) {
+              *s1_ond = i;
+            } else if (n2o[pri[i]] == *s2_ind) {
+              *s2_ond = i;
             }
-            //    m=(j%_s1)*warpSize+threadIdx.x%warpSize; //elemental offset in the input volume
-            m = threadIdx_x + (j - n * _s1 - l) * warpSize; // elemental offset in the input volume (alternative)
-            if (m < _vol_in)
-              buf0[n * _vol_in + m] = tens_in[_addr + m];
+          } // split indices (prioritized new numeration)
+          //  INPUT indexing (dim_in[], base_in[]: prioritized old numeration):
+          for (i = 0; i < dim_num; i++) {
+            tmp0[i] = dim_in[i];
+          } // save input dimension extents (old numeration)
+          j = 0;
+          for (i = 0; i < *minor_in; i++) {
+            pri[j++] = i;
+          } // input minor index set (old numeration)
+          for (i = 0; i < *minor_out; i++) {
+            if (n2o[i] >= *minor_in)
+              pri[j++] = n2o[i];
+          } // compl.output minor idex set (old numeration)
+          for (i = j; i < dim_num; i++) {
+            pri[i] = n2o[pri[i]];
+          } // external index set (just convert new numbers to old ones for
+            // consistency)
+          j = 1;
+          for (i = 0; i < dim_num; i++) {
+            dim_in[i] = j;
+            j *= tmp0[i];
+          } // input bases (old numeration)
+          for (i = 0; i < dim_num; i++) {
+            base_in[i] = dim_in[pri[i]];
+          } // input bases (prioritized old numeration)
+          for (i = 0; i < dim_num; i++) {
+            dim_in[i] = tmp0[pri[i]];
+          } // input extents (prioritized old numeration)
+          for (i = 0; i < dim_num; i++) {
+            if (pri[i] == *s1_ind) {
+              _s1 = i;
+            } else if (pri[i] == *s2_ind) {
+              _s2 = i;
+            }
+          } // split indices (prioritized old numeration)
+          *s1_ind = _s1;
+          *s2_ind = _s2;
+          *ns1 =
+              1 +
+              (*s1_dim - 1) /
+                  *s1_step; // number of segments from the 1st split minor index
+          *ns2 =
+              1 +
+              (*s2_dim - 1) /
+                  *s2_step; // number of segments from the 2nd split minor index
+          //  Index position correspondence for the minor index set (pri-new -->
+          //  pri-old):
+          j = 0;
+          for (i = 0; i < *minor_out; i++) {
+            if (n2o[i] < *minor_in) {
+              pri[i] = n2o[i];
+            } else {
+              pri[i] = (*minor_in + j);
+              j++;
+            }
           }
-          item_ct.barrier();
-          //   Write the minor volume from the buffer into the output tensor
-          //   block:
-          _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
-          _s1 = 1 + (_vol_out - 1) / warpSize; // number of warps (lines) which
-                                               // fully cover the output volume
-          for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
-            n = j / _s1;
-            _addr = _addr_out;
-            _vol = n;
-            _vol_in = 0; //_vol: Output column number (out_c)
-            //    for(i=minor_out;i<minor;i++){m=n%dim_out[i]; n/=dim_out[i];
-            //    _addr+=m*base_out[i]; _vol_in+=m*tmp0[pri[i]];}
-            for (i = *minor_out; i < *minor; i++) {
-              k = n / dim_out[i];
-              m = n - k * dim_out[i];
-              n = k;
-              _addr += m * base_out[i];
-              _vol_in += m * n2o[i];
+          j = 0;
+          for (i = 0; i < *minor_in; i++) {
+            if (o2n[i] < *minor_out) {
+              pri[o2n[i]] = i;
+            } else {
+              pri[*minor_out + j] = i;
+              j++;
             }
-            //    m=(j%_s1)*warpSize+threadIdx.x%warpSize; //elemental offset in
-            //    the output volume
-            m = threadIdx_x + (j - (int)_vol * _s1 - l) * warpSize; // elemental offset in the output volume (alternative)
-            if (m < _vol_out) {
-              _addr += m;
-              //     for(i=0;i<minor_out;i++){_vol_in+=(m%dim_out[i])*tmp0[pri[i]];
-              //     m/=dim_out[i];}
-              for (i = 0; i < *minor_out; i++) {
-                k = m / dim_out[i];
-                _vol_in += (m - k * dim_out[i]) * n2o[i];
+          }
+          // Check tensor transpose configuration parameters:
+          if (*minor <= 0 || *minor_in <= 0 || *minor_out <= 0 || _vol <= 0 ||
+              _vol_minor <= 0)
+            *err_code += 5000; // trap
+          if (*s1_ind >= dim_num || *s2_ind >= dim_num || *s1_ond >= dim_num ||
+              *s2_ond >= dim_num || *s1_ind == *s2_ind || *s1_ond == *s2_ond ||
+              *s1_step <= 0 || *s2_step <= 0)
+            *err_code += 1000; // trap
+          if ((*s1_step != dim_in[(*s1_ind)] && *s1_ind != *minor_in - 1 &&
+               *s1_ond != *minor_out - 1) ||
+              (*s2_step != dim_in[(*s2_ind)] && *s2_ind != *minor_in - 1 &&
+               *s2_ond != *minor_out - 1))
+            *err_code += 500; // trap
+          if ((_vol_minor * *s1_step * *s2_step) / (*s1_dim * *s2_dim) >
+              TENS_TRANSP_BUF_SIZE)
+            *err_code += 100; // trap
+        }                     // endif: non-trivial permutation
+      } else {
+        *err_code = 1 + 2 * blockDim_x % warpSize;
+      }
+    } // endif: Master thread.
+    item.barrier(cl::sycl::access::fence_space::local_space);
+
+    // Proceed:
+    if (*err_code == 0) {
+      if (*s1_ind > dim_num) { // tag of a trivial permutation
+                               // Direct copy:
+        _vol = *vol;
+        j = item.get_global_range(2);
+        i = item.get_global_id(2);
+        _addr_in = _vol - _vol % j;
+        for (_addr = 0; _addr < _addr_in; _addr += j) {
+          _addr_out = _addr + i;
+          auto cmplx_val = tens_in[_addr_out];
+          tens_out_real[_addr_out] = talshComplexReal(cmplx_val);
+          tens_out_real[_addr_out + _vol] = talshComplexImag(cmplx_val);
+        }
+        _addr_out = _addr_in + i;
+        if (_addr_out < _vol) {
+          auto cmplx_val = tens_in[_addr_out];
+          tens_out_real[_addr_out] = talshComplexReal(cmplx_val);
+          tens_out_real[_addr_out + _vol] = talshComplexImag(cmplx_val);
+        }
+      } else {                      // non-trivial permutation
+        l = threadIdx_x / warpSize; // l: warp number
+        // Distribute work accross CUDA blocks (external multi-index +
+        // splitting):
+        for (_work_piece = blockIdx_x; _work_piece < *vol_ext * *ns1 * *ns2;
+             _work_piece += gridDim_x) { //(ns1*ns2*vol_ext) is the total number
+                                         //of independent tasks
+          _addr = _work_piece;
+          _addr /= *vol_ext;
+          _vol = _work_piece - _addr * *vol_ext;
+          _s2 = (int)(_addr / *ns1);
+          _s1 = (int)(_addr - _s2 * *ns1); //{_addr_ext,_s1,_s2} --> tensor
+                                           // subblock (CUDA block)
+          //  Modify dimension extents due to possible dimension splitting:
+          if (threadIdx_x == 0) {
+            if (_s1 + 1 == *ns1) { // last segment of the 1st split index
+              j = *s1_dim - _s1 * *s1_step;
+              dim_in[(*s1_ind)] = j;
+              dim_out[(*s1_ond)] = j;
+            } else { // internal segment of the 1st split index
+              dim_in[(*s1_ind)] = *s1_step;
+              dim_out[(*s1_ond)] = *s1_step;
+            }
+            if (_s2 + 1 == *ns2) { // last segment of the 2nd split index
+              j = *s2_dim - _s2 * *s2_step;
+              dim_in[(*s2_ind)] = j;
+              dim_out[(*s2_ond)] = j;
+            } else { // internal segment of the 2nd split index
+              dim_in[(*s2_ind)] = *s2_step;
+              dim_out[(*s2_ond)] = *s2_step;
+            }
+            j = 1;
+            for (i = 0; i < *minor; i++) {
+              tmp0[i] = j;
+              j *= dim_in[i];
+            } // minor buffer bases (pri-old)
+            for (i = 0; i < *minor; i++)
+              n2o[i] = tmp0[pri[i]]; // look up table to accelerate further
+                                     // accesses to tmp0[]
+          }
+          item.barrier(cl::sycl::access::fence_space::local_space);
+          //  Mount input/output volumes and bases:
+          _vol_in = dim_in[0];
+          for (i = 1; i < *minor_in; i++) {
+            _vol_in *= dim_in[i];
+          }
+          _vol_out = dim_out[0];
+          for (i = 1; i < *minor_out; i++) {
+            _vol_out *= dim_out[i];
+          }
+          _vol_minor = _vol_out;
+          for (i = *minor_out; i < *minor; i++) {
+            _vol_minor *= dim_out[i];
+          }
+          _addr_in = (_s1 * *s1_step) * base_in[(*s1_ind)] +
+                     (_s2 * *s2_step) * base_in[(*s2_ind)];
+          _addr_out = _vol;
+          for (i = *minor; i < dim_num; i++) {
+            _addr = _vol / dim_in[i];
+            _addr_in += (_vol - _addr * dim_in[i]) * base_in[i];
+            _vol = _addr;
+          }
+          _vol = _addr_out;
+          _addr_out = (_s1 * *s1_step) * base_out[(*s1_ond)] +
+                      (_s2 * *s2_step) * base_out[(*s2_ond)];
+          for (i = *minor; i < dim_num; i++) {
+            _addr = _vol / dim_out[i];
+            _addr_out += (_vol - _addr * dim_out[i]) * base_out[i];
+            _vol = _addr;
+          }
+          if (_vol_out > TENS_TRANSP_TAB_SIZE ||
+              _vol_minor > _vol_in * TENS_TRANSP_TAB_SIZE ||
+              _vol_minor > _vol_out * TENS_TRANSP_TAB_SIZE) {
+            //  Algorithm 0 (slower):
+            //   Read the minor volume into the buffer from the input tensor
+            //   block:
+            _vol_minor /= _vol_in;              // vol_in_c
+            _s1 = 1 + (_vol_in - 1) / warpSize; // number of warps (lines) which
+                                                // fully cover the input volume
+            _s2 = blockDim_x / warpSize; // number of whole warps in a thread
+                                         // block (each warp treats one line)
+            for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
+              m = j / _s1;
+              _addr = _addr_in;
+              n = m; // n: Input column number (in_c)
+              for (i = *minor_in; i < *minor; i++) {
+                k = m / dim_in[i];
+                _addr += (m - k * dim_in[i]) * base_in[i];
                 m = k;
               }
-              auto cmplx_val = buf0[_vol_in];
-              tens_out_real[_addr] = talshComplexReal(cmplx_val);
-              tens_out_real[_addr + _vol] = talshComplexImag(cmplx_val);
+              //    m=(j%_s1)*warpSize+threadIdx.x%warpSize; //elemental offset
+              //    in the input volume
+              m = threadIdx_x +
+                  (j - n * _s1 - l) * warpSize; // elemental offset in the input
+                                                // volume (alternative)
+              if (m < _vol_in)
+                buf0[n * _vol_in + m] = tens_in[_addr + m];
             }
-          }
-          item_ct.barrier();
-        } else {
-          //  Algorithm 1 (presumably faster):
-          //   Create per-block look-up tables:
-          m = _vol_minor / _vol_in; // vol_in_c
-          for (j = threadIdx_x; j < m; j += blockDim_x) { // column number (input)
-            _addr = 0;
-            _s1 = j;
-            //    for(i=minor_in;i<minor;i++){_addr+=(_s1%dim_in[i])*base_in[i];
-            //    _s1/=dim_in[i];}
-            for (i = *minor_in; i < *minor; i++) {
-              _s2 = _s1 / dim_in[i];
-              _addr += (_s1 - _s2 * dim_in[i]) * base_in[i];
-              _s1 = _s2;
+            item.barrier(cl::sycl::access::fence_space::local_space);
+            //   Write the minor volume from the buffer into the output tensor
+            //   block:
+            _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
+            _s1 =
+                1 + (_vol_out - 1) / warpSize; // number of warps (lines) which
+                                               // fully cover the output volume
+            for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
+              n = j / _s1;
+              _addr = _addr_out;
+              _vol = n;
+              _vol_in = 0; //_vol: Output column number (out_c)
+              //    for(i=minor_out;i<minor;i++){m=n%dim_out[i]; n/=dim_out[i];
+              //    _addr+=m*base_out[i]; _vol_in+=m*tmp0[pri[i]];}
+              for (i = *minor_out; i < *minor; i++) {
+                k = n / dim_out[i];
+                m = n - k * dim_out[i];
+                n = k;
+                _addr += m * base_out[i];
+                _vol_in += m * n2o[i];
+              }
+              //    m=(j%_s1)*warpSize+threadIdx.x%warpSize; //elemental offset
+              //    in the output volume
+              m = threadIdx_x + (j - (int)_vol * _s1 - l) *
+                                    warpSize; // elemental offset in the output
+                                              // volume (alternative)
+              if (m < _vol_out) {
+                _addr += m;
+                //     for(i=0;i<minor_out;i++){_vol_in+=(m%dim_out[i])*tmp0[pri[i]];
+                //     m/=dim_out[i];}
+                for (i = 0; i < *minor_out; i++) {
+                  k = m / dim_out[i];
+                  _vol_in += (m - k * dim_out[i]) * n2o[i];
+                  m = k;
+                }
+                auto cmplx_val = buf0[_vol_in];
+                tens_out_real[_addr] = talshComplexReal(cmplx_val);
+                tens_out_real[_addr + _vol] = talshComplexImag(cmplx_val);
+              }
             }
-            ftb[j] = _addr;
-          }
-          m = _vol_minor / _vol_out; // vol_out_c
-          for (j = threadIdx_x; j < m; j += blockDim_x) { // column number (output)
-            _addr = 0;
-            _s1 = j;
-            //    for(i=minor_out;i<minor;i++){_addr+=(_s1%dim_out[i])*base_out[i];
-            //    _s1/=dim_out[i];}
-            for (i = *minor_out; i < *minor; i++) {
-              _s2 = _s1 / dim_out[i];
-              _addr += (_s1 - _s2 * dim_out[i]) * base_out[i];
-              _s1 = _s2;
+            item.barrier(cl::sycl::access::fence_space::local_space);
+          } else {
+            //  Algorithm 1 (presumably faster):
+            //   Create per-block look-up tables:
+            m = _vol_minor / _vol_in; // vol_in_c
+            for (j = threadIdx_x; j < m;
+                 j += blockDim_x) { // column number (input)
+              _addr = 0;
+              _s1 = j;
+              //    for(i=minor_in;i<minor;i++){_addr+=(_s1%dim_in[i])*base_in[i];
+              //    _s1/=dim_in[i];}
+              for (i = *minor_in; i < *minor; i++) {
+                _s2 = _s1 / dim_in[i];
+                _addr += (_s1 - _s2 * dim_in[i]) * base_in[i];
+                _s1 = _s2;
+              }
+              ftb[j] = _addr;
             }
-            gtb[j] = _addr;
-          }
-          for (j = threadIdx_x; j < m; j += blockDim_x) { // column number (output)
-            n = 0;
-            _s1 = j;
-            //    for(i=minor_out;i<minor;i++){n+=(_s1%dim_out[i])*n2o[i];
-            //    _s1/=dim_out[i];}
-            for (i = *minor_out; i < *minor; i++) {
-              _s2 = _s1 / dim_out[i];
-              n += (_s1 - _s2 * dim_out[i]) * n2o[i];
-              _s1 = _s2;
+            m = _vol_minor / _vol_out; // vol_out_c
+            for (j = threadIdx_x; j < m;
+                 j += blockDim_x) { // column number (output)
+              _addr = 0;
+              _s1 = j;
+              //    for(i=minor_out;i<minor;i++){_addr+=(_s1%dim_out[i])*base_out[i];
+              //    _s1/=dim_out[i];}
+              for (i = *minor_out; i < *minor; i++) {
+                _s2 = _s1 / dim_out[i];
+                _addr += (_s1 - _s2 * dim_out[i]) * base_out[i];
+                _s1 = _s2;
+              }
+              gtb[j] = _addr;
             }
-            htb[j] = n;
-          }
-          for (j = threadIdx_x; j < _vol_out; j += blockDim_x) {
-            n = 0;
-            _s1 = j;
-            //    for(i=0;i<minor_out;i++){n+=(_s1%dim_out[i])*n2o[i];
-            //    _s1/=dim_out[i];}
-            for (i = 0; i < *minor_out; i++) {
-              _s2 = _s1 / dim_out[i];
-              n += (_s1 - _s2 * dim_out[i]) * n2o[i];
-              _s1 = _s2;
+            for (j = threadIdx_x; j < m;
+                 j += blockDim_x) { // column number (output)
+              n = 0;
+              _s1 = j;
+              //    for(i=minor_out;i<minor;i++){n+=(_s1%dim_out[i])*n2o[i];
+              //    _s1/=dim_out[i];}
+              for (i = *minor_out; i < *minor; i++) {
+                _s2 = _s1 / dim_out[i];
+                n += (_s1 - _s2 * dim_out[i]) * n2o[i];
+                _s1 = _s2;
+              }
+              htb[j] = n;
             }
-            stb[j] = n;
-          }
-          item_ct.barrier();
-          //   Read the minor volume into the buffer from the input tensor
-          //   block:
-          _vol_minor /= _vol_in;              // vol_in_c
-          _s1 = 1 + (_vol_in - 1) / warpSize; // number of warps (lines) which
-                                              // fully cover the input volume
-          _s2 = blockDim_x / warpSize; // number of whole warps in a thread
-                                       // block (each warp treats one line)
-          for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
-            m = j / _s1;
-            n = threadIdx_x +
-                (j - m * _s1 - l) * warpSize; // m: Input column number (in_c);
+            for (j = threadIdx_x; j < _vol_out; j += blockDim_x) {
+              n = 0;
+              _s1 = j;
+              //    for(i=0;i<minor_out;i++){n+=(_s1%dim_out[i])*n2o[i];
+              //    _s1/=dim_out[i];}
+              for (i = 0; i < *minor_out; i++) {
+                _s2 = _s1 / dim_out[i];
+                n += (_s1 - _s2 * dim_out[i]) * n2o[i];
+                _s1 = _s2;
+              }
+              stb[j] = n;
+            }
+            item.barrier(cl::sycl::access::fence_space::local_space);
+            //   Read the minor volume into the buffer from the input tensor
+            //   block:
+            _vol_minor /= _vol_in;              // vol_in_c
+            _s1 = 1 + (_vol_in - 1) / warpSize; // number of warps (lines) which
+                                                // fully cover the input volume
+            _s2 = blockDim_x / warpSize; // number of whole warps in a thread
+                                         // block (each warp treats one line)
+            for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
+              m = j / _s1;
+              n = threadIdx_x + (j - m * _s1 - l) *
+                                    warpSize; // m: Input column number (in_c);
                                               // n: Offset in the column
-            if (n < _vol_in) {
-              _addr = _addr_in + ftb[m] + n;
-              buf0[m * _vol_in + n] = tens_in[_addr];
+              if (n < _vol_in) {
+                _addr = _addr_in + ftb[m] + n;
+                buf0[m * _vol_in + n] = tens_in[_addr];
+              }
             }
-          }
-          item_ct.barrier();
-          //   Write the minor volume from the buffer into the output tensor
-          //   block:
-          _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
-          _s1 = 1 + (_vol_out - 1) / warpSize; // number of warps (lines) which fully cover the output volume
-          for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
-            m = j / _s1;
-            n = threadIdx_x + (j - m * _s1 - l) * warpSize; // m: Output column number
-                                              // (out_c); n: Offset in the column
-            if (n < _vol_out) {
-              _addr = _addr_out + gtb[m] + n;
-              _vol_in = htb[m] + stb[n];
-              auto cmplx_val = buf0[_vol_in];
-              tens_out_real[_addr] = talshComplexReal(cmplx_val);
-              tens_out_real[_addr + _vol] = talshComplexImag(cmplx_val);
+            item.barrier(cl::sycl::access::fence_space::local_space);
+            //   Write the minor volume from the buffer into the output tensor
+            //   block:
+            _vol_minor = (_vol_minor * _vol_in) / _vol_out; // vol_out_c
+            _s1 =
+                1 + (_vol_out - 1) / warpSize; // number of warps (lines) which
+                                               // fully cover the output volume
+            for (j = l; j < _s1 * _vol_minor; j += _s2) { // j: Line number
+              m = j / _s1;
+              n = threadIdx_x +
+                  (j - m * _s1 - l) *
+                      warpSize; // m: Output column number
+                                // (out_c); n: Offset in the column
+              if (n < _vol_out) {
+                _addr = _addr_out + gtb[m] + n;
+                _vol_in = htb[m] + stb[n];
+                auto cmplx_val = buf0[_vol_in];
+                tens_out_real[_addr] = talshComplexReal(cmplx_val);
+                tens_out_real[_addr + _vol] = talshComplexImag(cmplx_val);
+              }
             }
+            item.barrier(cl::sycl::access::fence_space::local_space);
           }
-          item_ct.barrier();
-        }
-      } // enddo _work_piece: independent work distribution among thread blocks
-    }
+        } // enddo _work_piece: independent work distribution among thread
+          // blocks
+      }
   }
   // Record errors if occured (for each block):
   if (threadIdx_x == 0) {
     if (*err_code != 0)
-      i = atomic_ref<T>( gpu_error_count ).fetch_add(1);
+      i = atomic_ref<int>(gpu_error_count).fetch_add(1);
   }
   return;
 }
@@ -3934,9 +4054,9 @@ template <typename T>
 void gpu_tensor_block_copy_scatter_dlf__(
     int dmo, int drc, int dim_num, int const_args_pos,
     const T *__restrict__ tens_in, T *__restrict__ tens_out,
-    sycl::nd_item<3> item_ct,
-    dpct::accessor<int, dpct::device, 2> const_args_dims,
-    dpct::accessor<int, dpct::device, 2> const_args_prmn, int *gpu_error_count,
+    cl::sycl::nd_item<1>& item,
+    constant_accessor<int, 2>& const_args_dims,
+    constant_accessor<int, 2>& const_args_prmn, int *gpu_error_count,
     int *n2o, size_t *vol, size_t *base_in, size_t *base_out)
 /**
    Scattering version of tensor transpose: tens_out=TRN(tens_in):
@@ -3951,121 +4071,123 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
 (transposed) tensor;
 **/
 {
-  size_t threadIdx_x = item_ct.get_local_id(2);
-  size_t blockDim_x = item_ct.get_local_range(2);
-  size_t gridDim_x = item_ct.get_group_range(2);
-  size_t blockIdx_x = item_ct.get_group(2);
+    size_t threadIdx_x = item.get_local_id(0);
+    size_t blockDim_x = item.get_local_range(0);
+    size_t gridDim_x = item.get_group_range(0);
+    size_t blockIdx_x = item.get_group(0);
+    size_t globalIdx_x = item.get_global_id(0);
+    size_t globalDim_x = item.get_global_range(0);
 
-  int i, j, k;
-  size_t _vol, _addr_in, _addr_out, _si;
+    int i, j, k;
+    size_t _vol, _addr_in, _addr_out, _si;
 
-  if (dim_num == 0) {
-    if (blockIdx_x == 0 && threadIdx_x == 0)
-      tens_out[0] = tens_in[0];
-  } else if (dim_num == 1) {
-    _vol = const_args_dims[const_args_pos][0];
-    j = item_ct.get_global_id(2);
-    for (_addr_in = j; _addr_in < _vol;
-         _addr_in += item_ct.get_global_range(2)) {
-      tens_out[_addr_in] = tens_in[_addr_in];
-    }
-  } else if (dim_num > 1) {
-
-    if (threadIdx_x == 0) {
-      k = 0;
-      for (i = 0; i < dim_num; i++) {
-        j = const_args_prmn[const_args_pos][i] - 1;
-        n2o[j] = i;
-        if (j != i)
-          k = 1;
+    if (dim_num == 0) {
+      if (blockIdx_x == 0 && threadIdx_x == 0)
+        tens_out[0] = tens_in[0];
+    } else if (dim_num == 1) {
+      _vol = const_args_dims[const_args_pos][0];
+      j = globalIdx_x;
+      for (_addr_in = j; _addr_in < _vol; _addr_in += globalDim_x) {
+        tens_out[_addr_in] = tens_in[_addr_in];
       }
-      if (k == 0) {       // trivial permutation
-        n2o[0] = dim_num; // trivial permutation flag
-        _vol = 1;
+    } else if (dim_num > 1) {
+
+      if (threadIdx_x == 0) {
+        k = 0;
         for (i = 0; i < dim_num; i++) {
-          _vol *= const_args_dims[const_args_pos][i];
+          j = const_args_prmn[const_args_pos][i] - 1;
+          n2o[j] = i;
+          if (j != i)
+            k = 1;
         }
-        *vol = _vol;
-      } else {          // non-trivial permutation
-        if (dmo == 0) { // normal dimension order
+        if (k == 0) {       // trivial permutation
+          n2o[0] = dim_num; // trivial permutation flag
           _vol = 1;
           for (i = 0; i < dim_num; i++) {
-            base_in[i] = _vol;
             _vol *= const_args_dims[const_args_pos][i];
           }
           *vol = _vol;
-          if (drc == 0) { // normal index permutation
+        } else {          // non-trivial permutation
+          if (dmo == 0) { // normal dimension order
             _vol = 1;
             for (i = 0; i < dim_num; i++) {
-              k = n2o[i];
-              base_out[k] = _vol;
-              _vol *= const_args_dims[const_args_pos][k];
-            }
-          } else { // inversed index permutation
-            _vol = 1;
-            for (i = 0; i < dim_num; i++) {
-              k = const_args_prmn[const_args_pos][i] - 1;
-              base_out[k] = _vol;
-              _vol *= const_args_dims[const_args_pos][k];
-            }
-          }
-        } else {          // inversed dimension order
-          if (drc == 0) { // normal index permutation
-            _vol = 1;
-            for (i = 0; i < dim_num; i++) {
-              k = const_args_prmn[const_args_pos][i] - 1;
               base_in[i] = _vol;
-              _vol *= const_args_dims[const_args_pos][k];
-            };
-            *vol = _vol;
-            _vol = 1;
-            for (i = 0; i < dim_num; i++) {
-              k = n2o[i];
-              base_out[k] = _vol;
               _vol *= const_args_dims[const_args_pos][i];
             }
-          } else { // inversed index permutation
-            _vol = 1;
-            for (i = 0; i < dim_num; i++) {
-              k = n2o[i];
-              base_in[i] = _vol;
-              _vol *= const_args_dims[const_args_pos][k];
-            };
             *vol = _vol;
-            _vol = 1;
-            for (i = 0; i < dim_num; i++) {
-              k = const_args_prmn[const_args_pos][i] - 1;
-              base_out[k] = _vol;
-              _vol *= const_args_dims[const_args_pos][i];
+            if (drc == 0) { // normal index permutation
+              _vol = 1;
+              for (i = 0; i < dim_num; i++) {
+                k = n2o[i];
+                base_out[k] = _vol;
+                _vol *= const_args_dims[const_args_pos][k];
+              }
+            } else { // inversed index permutation
+              _vol = 1;
+              for (i = 0; i < dim_num; i++) {
+                k = const_args_prmn[const_args_pos][i] - 1;
+                base_out[k] = _vol;
+                _vol *= const_args_dims[const_args_pos][k];
+              }
+            }
+          } else {          // inversed dimension order
+            if (drc == 0) { // normal index permutation
+              _vol = 1;
+              for (i = 0; i < dim_num; i++) {
+                k = const_args_prmn[const_args_pos][i] - 1;
+                base_in[i] = _vol;
+                _vol *= const_args_dims[const_args_pos][k];
+              };
+              *vol = _vol;
+              _vol = 1;
+              for (i = 0; i < dim_num; i++) {
+                k = n2o[i];
+                base_out[k] = _vol;
+                _vol *= const_args_dims[const_args_pos][i];
+              }
+            } else { // inversed index permutation
+              _vol = 1;
+              for (i = 0; i < dim_num; i++) {
+                k = n2o[i];
+                base_in[i] = _vol;
+                _vol *= const_args_dims[const_args_pos][k];
+              };
+              *vol = _vol;
+              _vol = 1;
+              for (i = 0; i < dim_num; i++) {
+                k = const_args_prmn[const_args_pos][i] - 1;
+                base_out[k] = _vol;
+                _vol *= const_args_dims[const_args_pos][i];
+              }
             }
           }
         }
       }
-    }
-    item_ct.barrier();
+      item.barrier(cl::sycl::access::fence_space::local_space);
 
-    _vol = *vol;
-    if (n2o[0] >= dim_num) { // trivial permutation
-      k = item_ct.get_global_range(2);
-      j = item_ct.get_global_id(2);
-      for (_addr_in = j; _addr_in < _vol; _addr_in += k) {
-        tens_out[_addr_in] = tens_in[_addr_in];
-      }
-    } else { // non-trivial permutation
-      j = item_ct.get_global_id(2);
-      for (_addr_in = j; _addr_in < _vol; _addr_in += item_ct.get_global_range(2)) {
-        _addr_out = 0;
-        _si = _addr_in;
-        for (i = dim_num - 1; i >= 0; i--) {
-          _addr_out += (_si / base_in[i]) * base_out[i];
-          _si %= base_in[i];
+      _vol = *vol;
+      if (n2o[0] >= dim_num) { // trivial permutation
+        k = globalDim_x;
+        j = globalIdx_x;
+        for (_addr_in = j; _addr_in < _vol; _addr_in += k) {
+          tens_out[_addr_in] = tens_in[_addr_in];
         }
-        tens_out[_addr_out] = tens_in[_addr_in];
+      } else { // non-trivial permutation
+        j = globalIdx_x;
+        for (_addr_in = j; _addr_in < _vol; _addr_in += globalDim_x) {
+          _addr_out = 0;
+          _si = _addr_in;
+          for (i = dim_num - 1; i >= 0; i--) {
+            _addr_out += (_si / base_in[i]) * base_out[i];
+            _si %= base_in[i];
+          }
+          tens_out[_addr_out] = tens_in[_addr_in];
+        }
       }
-    }
-  } else { // dim_num < 0
-    if (threadIdx_x == 0)
-      i = atomic_ref<T>( gpu_error_count ).fetch_add(1); // record an error (for each thread block)
+    } else { // dim_num < 0
+      if (threadIdx_x == 0)
+        i = atomic_ref<int>(gpu_error_count)
+                .fetch_add(1); // record an error (for each thread block)
   }
   return;
 }
@@ -4074,8 +4196,8 @@ stored; # tens_in[0:] - input tensor; OUTPUT: # tens_out[0:] - output
 template <typename T>
 void gpu_matrix_multiply_tn__(size_t ll, size_t lr, size_t lc, const T *arg1,
                               const T *arg2, T *arg0, T alpha,
-                              cl::sycl::nd_item<2>& item_ct, int *gpu_error_count,
-			      localAcc<T> buf1, localAcc<T> buf2)
+                              cl::sycl::nd_item<2>& item, int *gpu_error_count,
+			      local_accessor<T, 2>& buf1, local_accessor<T, 2>& buf2)
 /** arg0(0:ll-1,0:lr-1)+=arg1(0:lc-1,0:ll-1)*arg2(0:lc-1,0:lr-1)*alpha
     NOTES:
     # Thread block dimensions (.x and .y) must be equal to
@@ -4086,12 +4208,12 @@ MAT_MULT_TILE_DIM(X,Y), respectively.
   int i, j, l, m;
   T _val;
 
-  size_t threadIdx_x = item_ct.get_local_id(1);
-  size_t threadIdx_y = item_ct.get_local_id(0);
-  size_t blockDim_x  = item_ct.get_local_range(1);
-  size_t blockDim_y  = item_ct.get_local_range(0);
-  size_t blockIdx_x  = item_ct.get_group(1);
-  size_t blockIdx_y  = item_ct.get_group(0);
+  size_t threadIdx_x = item.get_local_id(1);
+  size_t threadIdx_y = item.get_local_id(0);
+  size_t blockDim_x = item.get_local_range(1);
+  size_t blockDim_y = item.get_local_range(0);
+  size_t blockIdx_x = item.get_group(1);
+  size_t blockIdx_y = item.get_group(0);
 
   if (lc > 0 && ll > 0 && lr > 0 && blockDim_x == MAT_MULT_TILE_DIMX && blockDim_y == MAT_MULT_TILE_DIMY) {
     _val = static_cast<T>(0.0);
@@ -4122,7 +4244,7 @@ MAT_MULT_TILE_DIM(X,Y), respectively.
               buf2[j][i] = arg2[_col * lc + (k + i)];
             } // Load a block of the 2nd argument into the shared memory
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
           // Multiply the two blocks:
           _row = _row_base + i;
           if (_col < lr) {
@@ -4135,22 +4257,22 @@ MAT_MULT_TILE_DIM(X,Y), respectively.
               _val = static_cast<T>(0.0);
             }
           }
-          item_ct.barrier();
+          item.barrier(cl::sycl::access::fence_space::local_space);
         }
-        _row_base += item_ct.get_group_range(1) * MAT_MULT_TILE_DIMX;
+        _row_base += item.get_group_range(1) * MAT_MULT_TILE_DIMX;
       }
-      _col_base += item_ct.get_group_range(0) * MAT_MULT_TILE_DIMY;
+      _col_base += item.get_group_range(0) * MAT_MULT_TILE_DIMY;
     }
   } else {
     if (threadIdx_x == 0 && threadIdx_y == 0)
-      i = atomic_ref<T>( gpu_error_count ).fetch_add(1); // record an error (for each thread block)
+      i = atomic_ref<int>(gpu_error_count).fetch_add(1); // record an error (for each thread block)
   }
   return;
 }
 
 // GPU DEBUG FUNCTIONS:
 int gpu_get_error_count()
-/** Returns the total number of CUDA errors occured on current GPU.
+/** Returns the total number of SYCL errors occured on current GPU.
     A negative return status means an error occurred. **/
   try {
     int i;
@@ -4347,8 +4469,8 @@ static cl::sycl::event *sycl_event_ptr(int gpu_num, int sycl_event_handle) {
   return nullptr;
 }
 
-// limit_cuda_blocks2d
-static void limit_sycl_workgroup2d(int max_blocks, int *bx, int *by)
+// limit_sycl_workgroups2d
+static void limit_sycl_workgroups2d(int max_blocks, int *bx, int *by)
 /** Limits the SYCL local-size (or work-group size) in a 2d grid to <max_blocks>.
     No argument validity check! **/
 {
@@ -4618,9 +4740,9 @@ int free_gpus(int gpu_beg, int gpu_end)
 	      err_onemkl = (cublas_handle[i] = nullptr, 0);
 	      if (err_onemkl == 0)
 		gpu_up[i] = GPU_MINE;
-	    }
+            }
 #endif
-	    // SYCL queue bank:
+            // SYCL queue bank:
 	    if (gpu_up[i] > GPU_OFF) {
 	      for (j = 0; j < MAX_SYCL_TASKS; j++)
 		SYCLQueueFreeHandle[i][j] = j;
@@ -4642,9 +4764,9 @@ int free_gpus(int gpu_beg, int gpu_end)
 	    LastTask[i] = nullptr;
 	    n--;
 	    talsh::get_current_device().reset();
-	  }
-	  gpu_up[i] = GPU_OFF; // GPU is taken out of use regardless of its status!
-	}
+          }
+          gpu_up[i] = GPU_OFF; // GPU is taken out of use regardless of its status!
+        }
       }
     }
     if (failure && VERBOSE)
@@ -5126,14 +5248,14 @@ int tensBlck_src_dev_id(const tensBlck_t *ctens, int *dev_kind)
 /** Returns the device id on which the source data (tensor body) resides.
     If <dev_kind> is provided (!=nullptr), the device id will be kind-specific,
     belonging to the device kind <dev_kind>. Otherwise, it will be the flat id.
-    A return status DEV_nullptr indicates no current source data. A return
+    A return status DEV_NULL indicates no current source data. A return
     status DEV_MAX indicates a failure (error). **/
 {
   int dev_id;
 
-  dev_id = DEV_nullptr;
+  dev_id = DEV_NULL;
   if (dev_kind != nullptr)
-    *dev_kind = DEV_nullptr;
+    *dev_kind = DEV_NULL;
   if (ctens == nullptr)
     return DEV_MAX;
   if (ctens->src_rsc != nullptr) {
@@ -5162,15 +5284,15 @@ int tensBlck_present(const tensBlck_t *ctens, int dev_id, int dev_kind)
   if (ctens->src_rsc != nullptr) {
     src_dev = ctens->src_rsc->dev_id;
   } else {
-    src_dev = DEV_nullptr;
+    src_dev = DEV_NULL;
   }
   if (ctens->dst_rsc != nullptr) {
     dst_dev = ctens->dst_rsc->dev_id;
   } else {
-    dst_dev = DEV_nullptr;
+    dst_dev = DEV_NULL;
   }
-  if (dev_kind == DEV_nullptr) {
-    if (dev_id == DEV_nullptr) {
+  if (dev_kind == DEV_NULL) {
+    if (dev_id == DEV_NULL) {
       if (src_dev >= 0 || dst_dev >= 0)
         return YEP;
     } else {
@@ -5182,7 +5304,7 @@ int tensBlck_present(const tensBlck_t *ctens, int dev_id, int dev_kind)
   } else {
     if (valid_device_kind(dev_kind) != YEP)
       return NVTAL_FAILURE;
-    if (dev_id == DEV_nullptr) {
+    if (dev_id == DEV_NULL) {
       devn = decode_device_id(src_dev, &devk);
       if (devn >= 0 && devk == dev_kind)
         return YEP;
@@ -5550,14 +5672,13 @@ int sycl_task_status(cudaTask_t *sycl_task)
 	sycl_task->task_error = 0;
 	task_stat = SYCL_TASK_COMPLETED; // SYCL task completed, memory released cleanly
       } else {
-	if (VERBOSE)
+        if (VERBOSE)
 	  printf("#ERROR(INT-TAL:sycl_task_status): sycl_task_finalize error %d\n", errc);
 	sycl_task->task_error = 127;
 	task_stat = SYCL_TASK_ERROR; // SYCL task completed, memory could not be released cleanly
       }
       gpu_stats[sycl_task->gpu_id].tasks_completed++;
-    }
-    else if (err == cl::sycl::info::event_command_status::running) {
+    } else if (err == cl::sycl::info::event_command_status::running) {
       task_stat = SYCL_TASK_INPUT_THERE; // computation started, input data is on device (can be reused later)
     }
     else if (err == cl::sycl::info::event_command_status::submitted) {
@@ -5610,13 +5731,12 @@ int sycl_task_completed(cudaTask_t *sycl_task)
       sycl_task->task_error = 0;
       gpu_stats[sycl_task->gpu_id].tasks_completed++;
     }
-  }
-  else if (err == cl::sycl::info::event_command_status::running ||
-	   err == cl::sycl::info::event_command_status::submitted) { // task is still in progress
+  } else if (err == cl::sycl::info::event_command_status::running ||
+             err == cl::sycl::info::event_command_status::
+                        submitted) { // task is still in progress
     ret_stat = SYCL_TASK_SCHEDULED;
-  }
-  else {
-      ret_stat = SYCL_TASK_EMPTY;
+  } else {
+    ret_stat = SYCL_TASK_EMPTY;
   }
 
   // strm_p = sycl_stream_ptr(sycl_task->gpu_id, sycl_task->queue_hl);
@@ -6074,8 +6194,7 @@ static int sycl_task_record(syclTask_t *sycl_task, unsigned int coh_ctrl, unsign
   return 0;
 }
 
-static int sycl_task_finalize(
-    syclTask_t *sycl_task) // do not call this function in tensor operations
+static int sycl_task_finalize(syclTask_t *sycl_task) // do not call this function in tensor operations
 /** Releases unneeded (temporary and other) memory resources right after a SYCL
    task has completed or failed. In case the resources cannot be released
    cleanly, it returns NOT_CLEAN just as a warning, but the SYCL task is
@@ -6223,7 +6342,6 @@ int gpu_matrix_multiply_tn(size_t ll, size_t lr, size_t lc, const T *lmat, const
     T *dptr, *lptr, *rptr;
     int bx, by, err_code;
     const char *err_msg;
-    int err;
 
     if (lc > 0 && ll > 0 && lr > 0 && lmat != nullptr && rmat != nullptr && dmat != nullptr) {
       dsize = ll * lr * sizeof(T);
@@ -6231,56 +6349,55 @@ int gpu_matrix_multiply_tn(size_t ll, size_t lr, size_t lc, const T *lmat, const
       rsize = lc * lr * sizeof(T);
       err_code = gpu_mem_alloc((void **)&dptr, dsize);
       if (err_code != 0)
-	return 1;
+        return 1;
       err_code = gpu_mem_alloc((void **)&lptr, lsize);
       if (err_code != 0)
-	return 2;
+        return 2;
       err_code = gpu_mem_alloc((void **)&rptr, rsize);
       if (err_code != 0)
-	return 3;
+        return 3;
       talsh::get_queue().memcpy((void *)dptr, (void *)dmat, dsize).wait();
       talsh::get_queue().memcpy((void *)lptr, (void *)lmat, lsize).wait();
       talsh::get_queue().memcpy((void *)rptr, (void *)rmat, rsize).wait();
       err_code = gpu_get_error_count();
       bx = 1 + (ll - 1) / MAT_MULT_TILE_DIMX;
       by = 1 + (lr - 1) / MAT_MULT_TILE_DIMY;
-      limit_cuda_blocks2d(MAX_SYCL_BLOCKS, &bx, &by);
+      limit_sycl_workgroups2d(MAX_SYCL_BLOCKS, &bx, &by);
       cl::sycl::range<2> blcks(bx, by);
       cl::sycl::range<2> thrds(MAT_MULT_TILE_DIMX, MAT_MULT_TILE_DIMY);
-      // if(DEBUG)
-      // printf("\n#DEBUG(tensor_algebra_gpu_intel:gpu_matrix_multiply_tn): Running
-      // GPU kernel ..."); //debug
 
       talsh::get_queue().submit([&](cl::sycl::handler &cgh) {
-	auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-	cl::sycl::range<2> buf1_range_ct(17 /*MAT_MULT_TILE_DIMX+1*/, 17 /*MAT_MULT_TILE_DIMX+1*/);
-	cl::sycl::range<2> buf2_range_ct(17 /*MAT_MULT_TILE_DIMY+1*/, 17 /*MAT_MULT_TILE_DIMX+1*/);
-	localAcc<T> buf1_acc_ct(buf1_range_ct1, cgh);
-	localAcc<T> buf2_acc_ct(buf2_range_ct1, cgh);
-	auto global_range = blcks * thrds;
+        cl::sycl::range<2> buf1_range(17 /*MAT_MULT_TILE_DIMX+1*/,
+                                      17 /*MAT_MULT_TILE_DIMX+1*/);
+        cl::sycl::range<2> buf2_range(17 /*MAT_MULT_TILE_DIMY+1*/,
+                                      17 /*MAT_MULT_TILE_DIMX+1*/);
+        local_accessor<T, 2> buf1_acc(buf1_range, cgh);
+        local_accessor<T, 2> buf2_acc(buf2_range, cgh);
+        auto global_range = blcks * thrds;
 
-	cgh.parallel_for(cl::sycl::nd_range<3>(global_range, thrds),
-			 [=](cl::sycl::nd_item<3> item_ct) {
-			   gpu_matrix_multiply_tn__(ll, lr, lc, lptr, rptr, dptr, (T)(1.0), item_ct,
-						    gpu_error_count_ptr_ct1,
-						    buf1_acc_ct, buf2_acc_ct);
-			 });
+        cgh.parallel_for(cl::sycl::nd_range<2>(global_range, thrds),
+                         [=](cl::sycl::nd_item<2> item) {
+                           gpu_matrix_multiply_tn__(
+                               ll, lr, lc, lptr, rptr, dptr, (T)(1.0), item,
+                               gpu_error_count_ptr, buf1_acc, buf2_acc);
+                         });
       });
       talsh::get_current_device().queues_wait_and_throw();
       if (gpu_get_error_count() > err_code)
-	return 9;
+        return 9;
       talsh::get_queue().memcpy((void *)dmat, (void *)dptr, dsize).wait();
       talsh::get_current_device().queues_wait_and_throw();
       err_code = gpu_mem_free((void *)rptr);
       if (err_code != 0)
-	return 12;
+        return 12;
       err_code = gpu_mem_free((void *)lptr);
       if (err_code != 0)
-	return 13;
+        return 13;
       err_code = gpu_mem_free((void *)dptr);
       if (err_code != 0)
-	return 14;
+        return 14;
       talsh::get_current_device().queues_wait_and_throw();
     } else {
       return 16;
@@ -6305,79 +6422,77 @@ int gpu_tensor_block_place(tensBlck_t *ctens, int gpu_id, unsigned int coh_ctrl,
     was recorded. If the source device where the tensor body resides
     coincides with the destination device, no transfer will be scheduled.
     The source tensor body must reside either on Host or on Nvidia GPU. **/
-  try {
+{
     int j, tds, gpu_ex, src_gpu, devk, cur_gpu, devid, nclean, errc;
     size_t tvol, tsize;
-    sycl::queue **sycl_queue;
-    sycl::event *sycl_start, *sycl_comput, *sycl_output, *sycl_finish, *dep_event;
-    std::chrono::time_point<std::chrono::high_resolution_clock> sycl_start_ct1;
-    std::chrono::time_point<std::chrono::high_resolution_clock> sycl_comput_ct1;
-    std::chrono::time_point<std::chrono::high_resolution_clock> sycl_output_ct1;
-    std::chrono::time_point<std::chrono::high_resolution_clock> sycl_finish_ct1;
-    int err;
+    cl::sycl::queue **sycl_queue;
+    cl::sycl::event *sycl_event;
+    // sycl::event *sycl_start, *sycl_comput, *sycl_output, *sycl_finish,
+    // *dep_event; std::chrono::time_point<std::chrono::high_resolution_clock>
+    // sycl_start_ct;
     const char *err_msg;
 
-  errc = 0;
-  nclean = 0;
-  // Argument check:
-  if (ctens == nullptr)
-    return -1;
-  if (sycl_task == nullptr)
-    return -2;
-  if (sycl_task_gpu_id(sycl_task) >= 0)
-    return -3; // SYCL task is not clean (destruct/clean it first)
-  if (tens_valid_data_kind(ctens->data_kind, &tds) != YEP)
-    return -4;
-  if (tensBlck_present(ctens, DEV_nullptr, DEV_INTEL_GPU) == YEP ||
-      tensBlck_present(ctens, DEV_nullptr, DEV_HOST) == YEP) {
-    // Determine the id of the transfer executing GPU:
-    cur_gpu = gpu_in_focus();                    // save the current GPU
-    gpu_ex = DEV_nullptr;                        // executing GPU
-    src_gpu = tensBlck_src_dev_id(ctens, &devk); // source GPU (or Host)
-    if (devk == DEV_HOST) {
-      src_gpu = DEV_nullptr;
-    } else {
-      if (devk != DEV_INTEL_GPU)
-        return -5;
-    } // src_gpu: source GPU (-1:Host)
-    if (gpu_id >= 0 && gpu_id < MAX_GPUS_PER_NODE) { // destination is a GPU
-      gpu_ex = gpu_id;
-      if (gpu_is_mine(gpu_ex) <= GPU_OFF)
-        return -6;
-    } else if (gpu_id < 0) { // destination is Host
-      if (src_gpu >= 0) {
-        gpu_ex = src_gpu;
+    errc = 0;
+    nclean = 0;
+    // Argument check:
+    if (ctens == nullptr)
+      return -1;
+    if (sycl_task == nullptr)
+      return -2;
+    if (sycl_task_gpu_id(sycl_task) >= 0)
+      return -3; // SYCL task is not clean (destruct/clean it first)
+    if (tens_valid_data_kind(ctens->data_kind, &tds) != YEP)
+      return -4;
+    if (tensBlck_present(ctens, DEV_NULL, DEV_INTEL_GPU) == YEP ||
+        tensBlck_present(ctens, DEV_NULL, DEV_HOST) == YEP) {
+      // Determine the id of the transfer executing GPU:
+      cur_gpu = gpu_in_focus();                    // save the current GPU
+      gpu_ex = DEV_NULL;                           // executing GPU
+      src_gpu = tensBlck_src_dev_id(ctens, &devk); // source GPU (or Host)
+      if (devk == DEV_HOST) {
+        src_gpu = DEV_NULL;
+      } else {
+        if (devk != DEV_INTEL_GPU)
+          return -5;
+      } // src_gpu: source GPU (-1:Host)
+      if (gpu_id >= 0 && gpu_id < MAX_GPUS_PER_NODE) { // destination is a GPU
+        gpu_ex = gpu_id;
         if (gpu_is_mine(gpu_ex) <= GPU_OFF)
-          return -7;
+          return -6;
+      } else if (gpu_id < 0) { // destination is Host
+        if (src_gpu >= 0) {
+          gpu_ex = src_gpu;
+          if (gpu_is_mine(gpu_ex) <= GPU_OFF)
+            return -7;
+        }
+      } else {
+        return -8; // invalid gpu_id
       }
-    } else {
-      return -8; // invalid gpu_id
-    }
-    // Construct the SYCL task:
-    if (gpu_ex < 0) { // Host-to-self transfer requested (no transfer)
-      errc = sycl_task_construct(sycl_task);
-    } else { // Host-to-GPU, GPU-to-Host, GPU-to-GPU
-      gpu_stats[gpu_ex].tasks_submitted++;
-      // Check peer access if appropriate:
-      if (src_gpu >= 0 && src_gpu != gpu_ex)
-        return DEVICE_UNABLE; // peer access impossible for this GPU device
-    }
-    // Activate the transfer executing GPU:
-    if (gpu_ex != cur_gpu) {
-      j = gpu_activate(gpu_ex);
-      if (j) {
+      // Construct the SYCL task:
+      if (gpu_ex < 0) { // Host-to-self transfer requested (no transfer)
+        errc = sycl_task_construct(sycl_task);
+      } else { // Host-to-GPU, GPU-to-Host, GPU-to-GPU
+        gpu_stats[gpu_ex].tasks_submitted++;
+        // Check peer access if appropriate:
+        if (src_gpu >= 0 && src_gpu != gpu_ex)
+          return DEVICE_UNABLE; // peer access impossible for this GPU device
+      }
+      // Activate the transfer executing GPU:
+      if (gpu_ex != cur_gpu) {
+        j = gpu_activate(gpu_ex);
+        if (j) {
+          j = gpu_activate(cur_gpu);
+          return -9;
+        }
+      } // activate the target GPU
+      if (err != 0) {
+        ++nclean;
+        err = 0; // clear the GPU error status (sets NOT_CLEAN on exit)
+      }
+      errc = sycl_task_construct(sycl_task, gpu_ex);
+      if (errc)
         j = gpu_activate(cur_gpu);
-        return -9;
-      }
-    } // activate the target GPU
-    if (err != 0) {
-      ++nclean;
-      err = 0; // clear the GPU error status (sets NOT_CLEAN on exit)
     }
-    errc = sycl_task_construct(sycl_task, gpu_ex);
-    if (errc)
-      j = gpu_activate(cur_gpu);
-  }
   if (errc) {
     if (errc == TRY_LATER || errc == DEVICE_UNABLE) {
       return errc;
@@ -6387,8 +6502,7 @@ int gpu_tensor_block_place(tensBlck_t *ctens, int gpu_id, unsigned int coh_ctrl,
   }
 
   // *** From this point all error codes must be positive and the SYCL task must
-  // be recorded! ***
-  // Set the SYCL task argument(s):
+  // be recorded! *** Set the SYCL task argument(s):
   errc = sycl_task_set_arg(sycl_task, 0, ctens);
   if (errc) {
     if (errc == TRY_LATER || errc == DEVICE_UNABLE) {
@@ -6417,30 +6531,13 @@ int gpu_tensor_block_place(tensBlck_t *ctens, int gpu_id, unsigned int coh_ctrl,
     errc = gpu_activate(cur_gpu);
     return 3;
   }
-  cuda_start = sycl_event_ptr(sycl_task->gpu_id, sycl_task->event_start_hl);
-  if (cuda_start == nullptr) {
+  sycl_event = sycl_event_ptr(sycl_task->gpu_id, sycl_task->event_hl);
+  if (sycl_event == nullptr) {
     errc = sycl_task_record(sycl_task, coh_ctrl, 4);
     errc = gpu_activate(cur_gpu);
     return 4;
   }
-  cuda_comput = sycl_event_ptr(sycl_task->gpu_id, sycl_task->event_comput_hl);
-  if (cuda_comput == nullptr) {
-    errc = sycl_task_record(sycl_task, coh_ctrl, 5);
-    errc = gpu_activate(cur_gpu);
-    return 5;
-  }
-  cuda_output = sycl_event_ptr(sycl_task->gpu_id, sycl_task->event_output_hl);
-  if (cuda_output == nullptr) {
-    errc = sycl_task_record(sycl_task, coh_ctrl, 6);
-    errc = gpu_activate(cur_gpu);
-    return 6;
-  }
-  cuda_finish = sycl_event_ptr(sycl_task->gpu_id, sycl_task->event_finish_hl);
-  if (cuda_finish == nullptr) {
-    errc = sycl_task_record(sycl_task, coh_ctrl, 7);
-    errc = gpu_activate(cur_gpu);
-    return 7;
-  }
+
   // Acquire global memory resources (destination resource):
   if (gpu_id >= 0) {
     devid = encode_device_id(DEV_INTEL_GPU, gpu_id);
@@ -6497,234 +6594,20 @@ int gpu_tensor_block_place(tensBlck_t *ctens, int gpu_id, unsigned int coh_ctrl,
     // the data is already on the executing GPU or Host)
   }
   // Record the start event:
-  /*
-    DPCT1012:104:
-    Detected
-    kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements
-    in SYCL. You
-    can change the
-    way time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:105:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by
-    the program
-    logic. This
-    original code
-    was replaced
-    with 0. You
-    may need to
-    rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_start_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  /*
-    DPCT1000:91:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
-  if (err != 0) {
-    /*
-      DPCT1001:90:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:106:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning
-      string was
-      inserted. You
-      need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGet"
-              "ErrorSt"
-              "ring "
-              "not "
-              "support"
-              "ed" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_place): "
-             "Unable to record the start event: %s\n",
-             err_msg);
-    j = sycl_task_record(sycl_task, coh_ctrl, 10);
-    j = gpu_activate(cur_gpu);
-    return 10;
-  }
+  cuda_start_ct = std::chrono::high_resolution_clock::now();
   // Schedule the data transfer:
   if (gpu_ex >= 0 && gpu_id != src_gpu) {
     // Make sure the data transfer does not begin before the data transfer from
     // the previous task has finished:
     if (LastTask[gpu_ex] != nullptr) { //`This should be done atomically for thread safety
       dep_event = sycl_event_ptr(LastTask[gpu_ex]->gpu_id, LastTask[gpu_ex]->event_comput_hl);
-      /*
-        DPCT1003:111:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
-      err = (*dep_event.wait(), 0); // input transfers should only begin after the previous task
-      // input transfers have completed
-      /*
-        DPCT1000:110:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
-      if (err != 0) {
-        /*
-          DPCT1001:109:
-          The
-          statement
-          could not
-          be removed.
-        */
-        /*
-          DPCT1009:112:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not
-          use the
-          error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite
-          this code.
-        */
-        err_msg = "cudaG"
-                  "etErr"
-                  "orStr"
-                  "ing "
-                  "not "
-                  "suppo"
-                  "rted" /*cudaGetErrorString(err)*/
-            ;
-        if (VERBOSE)
-          printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_place): "
-                 "Unable to create a task dependency: %s\n",
-                 err_msg);
-        j = sycl_task_record(sycl_task, coh_ctrl, 11);
-        j = gpu_activate(cur_gpu);
-        return 11;
-      }
+      err = (*dep_event.wait(),
+             0); // input transfers should only begin after the previous task
+                 // input transfers have completed
     }
     // Transfer:
-    /*
-      DPCT1003:113:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
-
-    *sycl_queue->memcpy(ctens->dst_rsc->gmem_p, ctens->src_rsc->gmem_p, tsize);
-
-    /*
-      DPCT1000:108:
-      Error
-      handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
-    if (err != 0) {
-      /*
-        DPCT1001:107:
-        The
-        statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:114:
-        SYCL uses
-        exceptions
-        to report
-        errors and
-        does not use
-        the error
-        codes. The
-        original
-        code was
-        commented
-        out and a
-        warning
-        string was
-        inserted.
-        You need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGe"
-                "tError"
-                "String"
-                " not "
-                "suppor"
-                "ted" /*cudaGetErrorString(err)*/
-          ;
-      if (VERBOSE)
-        printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_place): "
-               "Tensor body transfer failed: %s\n",
-               err_msg);
-      j = sycl_task_record(sycl_task, coh_ctrl, 12);
-      j = gpu_activate(cur_gpu);
-      return 12;
-    }
+    (*sycl_queue)
+        ->memcpy(ctens->dst_rsc->gmem_p, ctens->src_rsc->gmem_p, tsize);
     if (gpu_id >= 0) { // incoming traffic
       gpu_stats[gpu_ex].traffic_in += tsize;
     } else { // outgoing traffic (to Host)
@@ -6732,267 +6615,7 @@ int gpu_tensor_block_place(tensBlck_t *ctens, int gpu_id, unsigned int coh_ctrl,
     }
   }
   // Record other events:
-  /*
-    DPCT1012:115:
-    Detected
-    kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements
-    in SYCL. You
-    can change the
-    way time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:116:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by
-    the program
-    logic. This
-    original code
-    was replaced
-    with 0. You
-    may need to
-    rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_comput_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  /*
-    DPCT1000:93:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
-  if (err != 0) {
-    /*
-      DPCT1001:92:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:117:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning
-      string was
-      inserted. You
-      need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGet"
-              "ErrorSt"
-              "ring "
-              "not "
-              "support"
-              "ed" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_place): "
-             "Unable to record the compute event: %s\n",
-             err_msg);
-    j = sycl_task_record(sycl_task, coh_ctrl, 13);
-    j = gpu_activate(cur_gpu);
-    return 13;
-  }
-  /*
-    DPCT1012:118:
-    Detected
-    kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements
-    in SYCL. You
-    can change the
-    way time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:119:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by
-    the program
-    logic. This
-    original code
-    was replaced
-    with 0. You
-    may need to
-    rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_output_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  /*
-    DPCT1000:95:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
-  if (err != 0) {
-    /*
-      DPCT1001:94:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:120:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning
-      string was
-      inserted. You
-      need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGet"
-              "ErrorSt"
-              "ring "
-              "not "
-              "support"
-              "ed" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_place): "
-             "Unable to record the output event: %s\n",
-             err_msg);
-    errc = sycl_task_record(sycl_task, coh_ctrl, 14);
-    errc = gpu_activate(cur_gpu);
-    return 14;
-  }
-  /*
-    DPCT1012:121:
-    Detected
-    kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements
-    in SYCL. You
-    can change the
-    way time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:122:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by
-    the program
-    logic. This
-    original code
-    was replaced
-    with 0. You
-    may need to
-    rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_finish_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  /*
-    DPCT1000:97:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
-  if (err != 0) {
-    /*
-      DPCT1001:96:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:123:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning
-      string was
-      inserted. You
-      need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGet"
-              "ErrorSt"
-              "ring "
-              "not "
-              "support"
-              "ed" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_place): "
-             "Unable to record the finish event: %s\n",
-             err_msg);
-    errc = sycl_task_record(sycl_task, coh_ctrl, 15);
-    errc = gpu_activate(cur_gpu);
-    return 15;
-  }
+  cuda_finish_ct = std::chrono::high_resolution_clock::now();
   // Record the successfully scheduled SYCL task, update the Last Task, and
   // restore the original GPU:
   errc = sycl_task_record(sycl_task, coh_ctrl, 0);
@@ -7007,11 +6630,8 @@ else {
 if (nclean > 0 && errc == 0)
   errc = NOT_CLEAN;
 return errc;
-} catch (cl::sycl::exception const &exc) {
-  std::cerr << exc.what() << "Exception caught at file:" << __FILE__
-            << ", line:" << __LINE__ << std::endl;
-  std::exit(1);
 }
+
 //------------------------------------------------------------------------------------------
 // TENSOR INITIALIZATION (non-blocking):
 int gpu_tensor_block_init(tensBlck_t *dtens, double val_real, double val_imag,
@@ -7045,12 +6665,7 @@ int gpu_tensor_block_init(tensBlck_t *dtens, double val_real, double val_imag,
     void *darg;
     float fval;
     sycl::queue **sycl_queue;
-    sycl::event *sycl_start, *sycl_comput, *sycl_output, *sycl_finish, *dep_event;
-    std::chrono::time_point<std::chrono::high_resolution_clock> sycl_start_ct1;
-    std::chrono::time_point<std::chrono::high_resolution_clock> sycl_comput_ct1;
-    std::chrono::time_point<std::chrono::high_resolution_clock> sycl_output_ct1;
-    std::chrono::time_point<std::chrono::high_resolution_clock> sycl_finish_ct1;
-    int err;
+    sycl::event *dep_event;
     const char *err_msg;
 
     // if(DEBUG) printf("\n#DEBUG(tensor_algebra_gpu_intel:gpu_tensor_block_init):
@@ -7090,813 +6705,253 @@ int gpu_tensor_block_init(tensBlck_t *dtens, double val_real, double val_imag,
       return -29; // destination tensor source device id
     if (j == DEV_INTEL_GPU) {
       if (gpu_d != gpu_num) {
-      /*
-        DPCT1003:132:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
-      /*
-        DPCT1031:133:
-        DPC++
-        currently
-        does not
-        support
-        memory access
-        across peer
-        devices. The
-        output
-        parameter(s)
-        are set to 0.
-      */
-      err = (*&j = 0, 0);
-      if (err != 0 || j == 0)
-        return DEVICE_UNABLE; // peer access impossible for this GPU device
-    }
-  } else if (j == DEV_HOST) {
-    gpu_d = -1; // data is in Host memory
-  } else {
-    return DEVICE_UNABLE; // data is not in Host or GPU memory
-  }
-  cur_gpu = gpu_in_focus(); // save the current GPU
-  if (gpu_num != cur_gpu) {
-    errc = gpu_activate(gpu_num);
-    if (errc) {
-      errc = gpu_activate(cur_gpu);
-      return -32;
-    }
-  } // activate the target GPU
-  /*
-    DPCT1010:134:
-    SYCL uses
-    exceptions to
-    report errors
-    and does not
-    use the error
-    codes. The call
-    was replaced
-    with 0. You
-    need to rewrite
-    this code.
-  */
-  err = 0;
-  err = 0; // clear the GPU error status
-  targ_dev = encode_device_id(DEV_INTEL_GPU, gpu_num); // flat device id
-  // Construct a SYCL task (acquire CUDA resources) for the target GPU:
-  errc = sycl_task_construct(sycl_task, gpu_num);
-  if (errc) {
-    i = gpu_activate(cur_gpu);
-    if (errc == TRY_LATER || errc == DEVICE_UNABLE) {
-      return errc;
+        // todo: cudaDeviceCanAccessPeer ????
+        err = (*&j = 0, 0);
+        if (err != 0 || j == 0)
+          return DEVICE_UNABLE; // peer access impossible for this GPU device
+      }
+    } else if (j == DEV_HOST) {
+      gpu_d = -1; // data is in Host memory
     } else {
-      return -33;
+      return DEVICE_UNABLE; // data is not in Host or GPU memory
     }
-  }
-
-  // *** From this point all error codes must be positive and the SYCL task must
-  // be recorded! ***
-  // Set up tensor arguments (allocates additional resources for each tensor
-  // argument):
-  // Destination argument:
-  errc = sycl_task_set_arg(sycl_task, 0, dtens);
-  if (errc) {
-    if (errc == TRY_LATER || errc == DEVICE_UNABLE) {
-      i = sycl_task_record(sycl_task, coh_ctrl, NVTAL_DEFERRED);
-      i = gpu_activate(
-          cur_gpu); // not an error if TRY_LATER or DEVICE_UNABLE are returned
-      return errc;
-    } else {
-      i = sycl_task_record(sycl_task, coh_ctrl, 1);
-      i = gpu_activate(cur_gpu);
-      return 1;
-    }
-  }
-  // Associate CUDA stream and event pointers locally for convenience:
-  sycl_queue = sycl_queue_ptr(sycl_task->gpu_id, sycl_task->queue_hl);
-  if (sycl_queue == nullptr) {
-    errc = sycl_task_record(sycl_task, coh_ctrl, 4);
-    errc = gpu_activate(cur_gpu);
-    return 4;
-  }
-  sycl_start = sycl_event_ptr(sycl_task->gpu_id, sycl_task->event_start_hl);
-  if (sycl_start == nullptr) {
-    errc = sycl_task_record(sycl_task, coh_ctrl, 5);
-    errc = gpu_activate(cur_gpu);
-    return 5;
-  }
-  sycl_comput = sycl_event_ptr(sycl_task->gpu_id, sycl_task->event_comput_hl);
-  if (sycl_comput == nullptr) {
-    errc = sycl_task_record(sycl_task, coh_ctrl, 6);
-    errc = gpu_activate(cur_gpu);
-    return 6;
-  }
-  sycl_output = sycl_event_ptr(sycl_task->gpu_id, sycl_task->event_output_hl);
-  if (sycl_output == nullptr) {
-    errc = sycl_task_record(sycl_task, coh_ctrl, 7);
-    errc = gpu_activate(cur_gpu);
-    return 7;
-  }
-  sycl_finish = sycl_event_ptr(sycl_task->gpu_id, sycl_task->event_finish_hl);
-  if (sycl_finish == nullptr) {
-    errc = sycl_task_record(sycl_task, coh_ctrl, 8);
-    errc = gpu_activate(cur_gpu);
-    return 8;
-  }
-  vol_d = tensBlck_volume(dtens); // tensor block volume
-  dsize = vol_d * tds_d;          // tensor argument size in bytes
-  // Acquire global memory resources for tensor arguments if needed:
-  // Set up destination memory resources in all tensors:
-  //  Destination tensor:
-  if (dtens->dst_rsc == dtens->src_rsc)
-    dtens->dst_rsc =
-        nullptr; // destination resource was pointing to the source resource
-  if (gpu_d != gpu_num) { // data is on a different GPU device or Host
-    if (dtens->dst_rsc == nullptr) {
-      errc = tensDevRsc_create(&(dtens->dst_rsc));
+    cur_gpu = gpu_in_focus(); // save the current GPU
+    if (gpu_num != cur_gpu) {
+      errc = gpu_activate(gpu_num);
       if (errc) {
-        i = sycl_task_record(sycl_task, coh_ctrl, 11);
-        i = gpu_activate(cur_gpu);
-        return 11;
+        errc = gpu_activate(cur_gpu);
+        return -32;
       }
-    } else {
-      if (tensDevRsc_is_empty(dtens->dst_rsc) == NOPE) {
-        errc = tensDevRsc_release_all(dtens->dst_rsc);
-        if (errc)
-          stat = NOT_CLEAN;
+    } // activate the target GPU
+    err = 0;
+    err = 0; // clear the GPU error status
+    targ_dev = encode_device_id(DEV_INTEL_GPU, gpu_num); // flat device id
+    // Construct a SYCL task (acquire CUDA resources) for the target GPU:
+    errc = sycl_task_construct(sycl_task, gpu_num);
+    if (errc) {
+      i = gpu_activate(cur_gpu);
+      if (errc == TRY_LATER || errc == DEVICE_UNABLE) {
+        return errc;
+      } else {
+        return -33;
       }
     }
-    errc = tensDevRsc_allocate_mem(dtens->dst_rsc, targ_dev, dsize, YEP);
+
+    // *** From this point all error codes must be positive and the SYCL task
+    // must be recorded! *** Set up tensor arguments (allocates additional
+    // resources for each tensor argument): Destination argument:
+    errc = sycl_task_set_arg(sycl_task, 0, dtens);
     if (errc) {
       if (errc == TRY_LATER || errc == DEVICE_UNABLE) {
         i = sycl_task_record(sycl_task, coh_ctrl, NVTAL_DEFERRED);
-        i = gpu_activate(cur_gpu);
+        i = gpu_activate(
+            cur_gpu); // not an error if TRY_LATER or DEVICE_UNABLE are returned
         return errc;
       } else {
-        i = sycl_task_record(sycl_task, coh_ctrl, 12);
+        i = sycl_task_record(sycl_task, coh_ctrl, 1);
         i = gpu_activate(cur_gpu);
-        return 12;
+        return 1;
       }
     }
-  } else {
-    if (dtens->dst_rsc != nullptr) {
-      if (tensDevRsc_is_empty(dtens->dst_rsc) == NOPE) {
-        errc = tensDevRsc_release_all(dtens->dst_rsc);
-        if (errc)
-          stat = NOT_CLEAN;
-      }
-    }
-    dtens->dst_rsc =
-        dtens->src_rsc; // destination and source resources are the same
-                        // (because the data is already on the computing GPU)
-  }
-  // Start scheduling CUDA calls:
-  /*
-    DPCT1012:135:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:136:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  sycl_start_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  /*
-    DPCT1000:125:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
-  if (err != 0) {
-    /*
-      DPCT1001:124:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:137:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_init): Unable "
-             "to record the start event: %s\n",
-             err_msg);
-    errc = sycl_task_record(sycl_task, coh_ctrl, 23);
-    errc = gpu_activate(cur_gpu);
-    return 23;
-  }
-  if (LastTask[gpu_num] !=
-      nullptr) { //`This should be done atomically for thread safety
-    dep_event = sycl_event_ptr(LastTask[gpu_num]->gpu_id,
-                               LastTask[gpu_num]->event_comput_hl);
-    /*
-      DPCT1003:140:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
-    err = (*dep_event.wait(),
-           0); // input
-    // transfers
-    // should
-    // only
-    // begin
-    // after
-    // the
-    // previous
-    // task
-    // input
-    // transfers
-    // have
-    // completed
-    /*
-      DPCT1000:139:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
-    if (err != 0) {
-      /*
-        DPCT1001:138:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:141:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
-      if (VERBOSE)
-        printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_init): "
-               "Unable to create a task dependency: %s\n",
-               err_msg);
-      errc = sycl_task_record(sycl_task, coh_ctrl, 24);
-      errc = gpu_activate(cur_gpu);
-      return 24;
-    }
-  }
-  // Schedule forward data transfers for all tensors if needed:
-  // Destination tensor:
-  if (sycl_task->tens_args[0].const_mem_entry >=
-      0) { // GPU constant memory entry will contain tensor dimension extents
-           // and the matricization permutation (if any)
-    *sycl_queue->memcpy((char *)(const_args_dims.get_ptr()) + sizeof(int) * ((size_t)(MAX_TENSOR_RANK * (sycl_task->tens_args[0].const_mem_entry))),
-			(void *)(dtens->shape.dims),
-			sizeof(int) * ((size_t)drank)); // tensor
-    // dimension
-    // extents
-    /*
-      DPCT1000:143:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
-    if (err != 0) {
-      /*
-        DPCT1001:142:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:145:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
-      if (VERBOSE)
-        printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_init): "
-               "Destination tensor dims H2D copy failed: %s\n",
-               err_msg);
-      errc = sycl_task_record(sycl_task, coh_ctrl, 33);
-      errc = gpu_activate(cur_gpu);
-      return 33;
-    }
-    gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)drank);
-    if (gpu_d != gpu_num) { // data is not on the computing GPU
-      *sycl_queue->memcpy(dtens->dst_rsc->gmem_p, dtens->src_rsc->gmem_p, dsize);
 
-      /*
-        DPCT1000:147:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
-      if (err != 0) {
-        /*
-          DPCT1001:146:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:149:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
+    vol_d = tensBlck_volume(dtens); // tensor block volume
+    dsize = vol_d * tds_d;          // tensor argument size in bytes
+    // Acquire global memory resources for tensor arguments if needed:
+    // Set up destination memory resources in all tensors:
+    // Destination tensor:
+    if (dtens->dst_rsc == dtens->src_rsc)
+      dtens->dst_rsc =
+          nullptr; // destination resource was pointing to the source resource
+    if (gpu_d != gpu_num) { // data is on a different GPU device or Host
+      if (dtens->dst_rsc == nullptr) {
+        errc = tensDevRsc_create(&(dtens->dst_rsc));
+        if (errc) {
+          i = sycl_task_record(sycl_task, coh_ctrl, 11);
+          i = gpu_activate(cur_gpu);
+          return 11;
+        }
+      } else {
+        if (tensDevRsc_is_empty(dtens->dst_rsc) == NOPE) {
+          errc = tensDevRsc_release_all(dtens->dst_rsc);
+          if (errc)
+            stat = NOT_CLEAN;
+        }
+      }
+      errc = tensDevRsc_allocate_mem(dtens->dst_rsc, targ_dev, dsize, YEP);
+      if (errc) {
+        if (errc == TRY_LATER || errc == DEVICE_UNABLE) {
+          i = sycl_task_record(sycl_task, coh_ctrl, NVTAL_DEFERRED);
+          i = gpu_activate(cur_gpu);
+          return errc;
+        } else {
+          i = sycl_task_record(sycl_task, coh_ctrl, 12);
+          i = gpu_activate(cur_gpu);
+          return 12;
+        }
+      }
+    } else {
+      if (dtens->dst_rsc != nullptr) {
+        if (tensDevRsc_is_empty(dtens->dst_rsc) == NOPE) {
+          errc = tensDevRsc_release_all(dtens->dst_rsc);
+          if (errc)
+            stat = NOT_CLEAN;
+        }
+      }
+      dtens->dst_rsc =
+          dtens->src_rsc; // destination and source resources are the same
+      // (because the data is already on the computing GPU)
+    }
+    // Start scheduling SYCL calls:
+    if (LastTask[gpu_num] !=
+        nullptr) { //`This should be done atomically for thread safety
+      dep_event = sycl_event_ptr(LastTask[gpu_num]->gpu_id,
+                                 LastTask[gpu_num]->event_comput_hl);
+      try {
+        dep_event
+            ->wait_and_throw(); // input transfers should only begin after the
+                                // previous task input transfers have completed
+      } catch (cl::sycl::exception const &exc) {
         if (VERBOSE)
-          printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_init): "
-                 "Destination tensor body copy failed: %s\n",
-                 err_msg);
-        errc = sycl_task_record(sycl_task, coh_ctrl, 35);
+          std::cerr << "#ERROR: Unable to create a task dependency: "
+                    << exc.what() << ", at " << __FILE__
+                    << ", line:" << __LINE__ << std::endl;
+        errc = sycl_task_record(sycl_task, coh_ctrl, 24);
         errc = gpu_activate(cur_gpu);
-        return 35;
+        return 24;
       }
-      gpu_stats[gpu_num].traffic_in += dsize;
     }
-  } else {
-    errc = sycl_task_record(sycl_task, coh_ctrl, 36);
-    errc = gpu_activate(cur_gpu);
-    return 36;
-  }
-  // Record a SYCL queue:
-  /*
-    DPCT1012:150:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:151:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  sycl_comput_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  /*
-    DPCT1000:127:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
-  if (err != 0) {
-    /*
-      DPCT1001:126:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:152:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_init): Unable "
-             "to record the compute event: %s\n",
-             err_msg);
-    errc = sycl_task_record(sycl_task, coh_ctrl, 37);
-    errc = gpu_activate(cur_gpu);
-    return 37;
-  }
-  // Destination tensor argument does not need transposing:
-  darg = dtens->dst_rsc->gmem_p;
-// Schedule the appropriate computation kernel:
-  // Initialization kernel:
-  bx = 1 + (vol_d - 1) / THRDS_ARRAY_INIT;
-  if (bx > MAX_SYCL_BLOCKS)
-    bx = MAX_SYCL_BLOCKS;
-  switch (dtens->data_kind) {
-  case R4:
-    fval = (float)val_real;
-    (*sycl_queue)->submit([&](sycl::handler &cgh) {
-      cgh.parallel_for(sycl::nd_range(sycl::range(1, 1, bx) * sycl::range(1, 1, THRDS_ARRAY_INIT),
-                                      sycl::range(1, 1, THRDS_ARRAY_INIT)),
-                       [=](sycl::nd_item<3> item_ct) {
-                         gpu_array_init__(vol_d, (float *)darg, fval, item_ct);
-                       });
-    });
-    break;
-  case R8:
-    (*sycl_queue)->submit([&](sycl::handler &cgh) {
-      cgh.parallel_for(sycl::nd_range(sycl::range(1, 1, bx) * sycl::range(1, 1, THRDS_ARRAY_INIT),
-                                      sycl::range(1, 1, THRDS_ARRAY_INIT)),
-                       [=](sycl::nd_item<3> item_ct) {
-                         gpu_array_init__(vol_d, (double *)darg, val_real,
-                                          item_ct);
-                       });
-    });
-    break;
-  case C4:
-    (*sycl_queue)->submit([&](sycl::handler &cgh) {
-      auto talshComplex4Set_float_val_real_float_val_imag_ct2 = talshComplex4Set((float)val_real, (float)val_imag);
-
-      cgh.parallel_for(sycl::nd_range(sycl::range(1, 1, bx) * sycl::range(1, 1, THRDS_ARRAY_INIT),
-                                      sycl::range(1, 1, THRDS_ARRAY_INIT)),
-                       [=](sycl::nd_item<3> item_ct) {
-                         gpu_array_init__(
-                             vol_d, (talshComplex4 *)darg,
-                             talshComplex4Set_float_val_real_float_val_imag_ct2,
-                             item_ct);
-                       });
-    });
-    break;
-  case C8:
-    (*sycl_queue)->submit([&](sycl::handler &cgh) {
-      auto talshComplex8Set_val_real_val_imag_ct2 =
-          talshComplex8Set(val_real, val_imag);
-
-      cgh.parallel_for(sycl::nd_range(sycl::range(1, 1, bx) * sycl::range(1, 1, THRDS_ARRAY_INIT),
-                                      sycl::range(1, 1, THRDS_ARRAY_INIT)),
-                       [=](sycl::nd_item<3> item_ct) {
-                         gpu_array_init__(
-                             vol_d, (talshComplex8 *)darg,
-                             talshComplex8Set_val_real_val_imag_ct2, item_ct);
-                       });
-    });
-    break;
-  default:
-    errc = sycl_task_record(sycl_task, coh_ctrl, 48);
-    errc = gpu_activate(cur_gpu);
-    return 48;
-  }
-  // Record a SYCL queue (output ready on GPU):
-  /*
-    DPCT1012:153:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:154:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  sycl_output_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  if (err != 0) {
-    /*
-      DPCT1009:155:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_init): Unable "
-             "to record the output event: %s\n",
-             err_msg);
-    errc = sycl_task_record(sycl_task, coh_ctrl, 56);
-    errc = gpu_activate(cur_gpu);
-    return 56;
-  }
-  // Transfer back the updated destination tensor if needed ("T","K" coherence control):
-  coh = (coh_ctrl) &
-        (TWO_BITS_SET); // select bits 0,1 (destination tensor coherence)
-  if (gpu_d != gpu_num && coh >= 2) { // data is not on the computing GPU and
-                                      // coherence control = 2("T") or (3)"K":
-    err = (*sycl_queue->memcpy(dtens->src_rsc->gmem_p, dtens->dst_rsc->gmem_p,
-                                dsize),
-           0);
-    if (err != 0) {
-      /*
-        DPCT1001:156:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:159:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
-      if (VERBOSE)
-        printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_init): "
-               "Destination tensor body back copy failed: %s\n",
-               err_msg);
-      errc = sycl_task_record(sycl_task, coh_ctrl, 57);
+    // Schedule forward data transfers for all tensors if needed:
+    // Destination tensor:
+    if (sycl_task->tens_args[0].const_mem_entry >= 0) {
+      // GPU constant memory entry will contain tensor dimension extents and the
+      // matricization permutation (if any)
+      try {
+        (*sycl_queue)
+            ->memcpy(
+                (char *)(const_args_dims.get_ptr()) +
+                    sizeof(int) *
+                        ((size_t)(MAX_TENSOR_RANK *
+                                  (sycl_task->tens_args[0].const_mem_entry))),
+                (void *)(dtens->shape.dims),
+                sizeof(int) * ((size_t)drank)); // tensor dimension extents
+      } catch (cl::sycl::exception const &exc) {
+        if (VERBOSE)
+          std::cerr << "#ERROR: Destination tensor dims H2D copy failed: "
+                    << exc.what() << ", at " << __FILE__
+                    << ", line:" << __LINE__ << std::endl;
+        errc = sycl_task_record(sycl_task, coh_ctrl, 33);
+        errc = gpu_activate(cur_gpu);
+        return 33;
+      }
+      gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)drank);
+      if (gpu_d != gpu_num) { // data is not on the computing GPU
+        try {
+          (*sycl_queue)
+              ->memcpy(dtens->dst_rsc->gmem_p, dtens->src_rsc->gmem_p, dsize);
+        } catch (cl::sycl::exception const &exc) {
+          if (VERBOSE)
+            std::cerr << "#ERROR: Destination tensor body copy failed: "
+                      << exc.what() << ", at " << __FILE__
+                      << ", line:" << __LINE__ << std::endl;
+          errc = sycl_task_record(sycl_task, coh_ctrl, 35);
+          errc = gpu_activate(cur_gpu);
+          return 35;
+        }
+        gpu_stats[gpu_num].traffic_in += dsize;
+      }
+    } else {
+      errc = sycl_task_record(sycl_task, coh_ctrl, 36);
       errc = gpu_activate(cur_gpu);
-      return 57;
+      return 36;
     }
-    gpu_stats[gpu_num].traffic_out += dsize;
-  }
-  // Record a SYCL queue (task finished):
-  /*
-    DPCT1012:160:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:161:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  sycl_finish_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  /*
-    DPCT1000:131:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
-  if (err != 0) {
-    /*
-      DPCT1001:130:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:162:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_init): Unable "
-             "to record the finish event: %s\n",
-             err_msg);
-    errc = sycl_task_record(sycl_task, coh_ctrl, 58);
-    errc = gpu_activate(cur_gpu);
-    return 58;
-  }
-  // Record the successfully scheduled SYCL task and update the Last Task:
-  errc = sycl_task_record(sycl_task, coh_ctrl, 0);
-  LastTask[gpu_num] = sycl_task;
-  if (gpu_num != cur_gpu)
-    errc = gpu_activate(cur_gpu);
-  return stat; // either 0 (success) or NOT_CLEAN (warning)
+
+    // Destination tensor argument does not need transposing:
+    darg = dtens->dst_rsc->gmem_p;
+
+    // Initialization kernel:
+    bx = 1 + (vol_d - 1) / THRDS_ARRAY_INIT;
+    if (bx > MAX_SYCL_BLOCKS)
+      bx = MAX_SYCL_BLOCKS;
+    switch (dtens->data_kind) {
+    case R4:
+      fval = (float)val_real;
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        cgh.parallel_for(
+            cl::sycl::nd_range<1>(bx * THRDS_ARRAY_INIT, THRDS_ARRAY_INIT),
+            [=](cl::sycl::nd_item<1> item) {
+              gpu_array_init__(vol_d, (float *)darg, fval, item);
+            });
+      });
+      break;
+    case R8:
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        cgh.parallel_for(
+            cl::sycl::nd_range<1>(bx * THRDS_ARRAY_INIT, THRDS_ARRAY_INIT),
+            [=](cl::sycl::nd_item<1> item) {
+              gpu_array_init__(vol_d, (double *)darg, val_real, item);
+            });
+      });
+      break;
+    case C4:
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        cgh.parallel_for(
+            cl::sycl::nd_range<1>(bx * THRDS_ARRAY_INIT, THRDS_ARRAY_INIT),
+            [=](cl::sycl::nd_item<1> item) {
+              gpu_array_init__(
+                  vol_d, (talshComplex4 *)darg,
+                  talshComplex4Set((float)val_real, (float)val_imag), item);
+            });
+      });
+      break;
+    case C8:
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        cgh.parallel_for(
+            cl::sycl::nd_range<1>(bx * THRDS_ARRAY_INIT, THRDS_ARRAY_INIT),
+            [=](cl::sycl::nd_item<1> item) {
+              gpu_array_init__(vol_d, (talshComplex8 *)darg,
+                               talshComplex8Set(val_real, val_imag), item);
+            });
+      });
+      break;
+    default:
+      errc = sycl_task_record(sycl_task, coh_ctrl, 48);
+      errc = gpu_activate(cur_gpu);
+      return 48;
+    }
+
+    // Transfer back the updated destination tensor if needed ("T","K" coherence
+    // control):
+    coh = (coh_ctrl) &
+          (TWO_BITS_SET); // select bits 0,1 (destination tensor coherence)
+    if (gpu_d != gpu_num && coh >= 2) { // data is not on the computing GPU and
+                                        // coherence control = 2("T") or (3)"K":
+      try {
+        (*sycl_queue)
+            ->memcpy(dtens->src_rsc->gmem_p, dtens->dst_rsc->gmem_p, dsize);
+      } catch (cl::sycl::exception const &exc) {
+        if (VERBOSE)
+          std::cerr << "#ERROR: Destination tensor body back copy failed: "
+                    << exc.what() << ", at " << __FILE__
+                    << ", line:" << __LINE__ << std::endl;
+        errc = sycl_task_record(sycl_task, coh_ctrl, 57);
+        errc = gpu_activate(cur_gpu);
+        return 57;
+      }
+      gpu_stats[gpu_num].traffic_out += dsize;
+    }
+
+    // Record the successfully scheduled SYCL task and update the Last Task:
+    errc = sycl_task_record(sycl_task, coh_ctrl, 0);
+    LastTask[gpu_num] = sycl_task;
+    if (gpu_num != cur_gpu)
+      errc = gpu_activate(cur_gpu);
+    return stat; // either 0 (success) or NOT_CLEAN (warning)
 } catch (cl::sycl::exception const &exc) {
   std::cerr << exc.what() << "Exception caught at file:" << __FILE__
             << ", line:" << __LINE__ << std::endl;
   std::exit(1);
 }
+
 //-------------------------------------------------------------------------------------------------------------
 // TENSOR SLICING (non-blocking):
 int gpu_tensor_block_slice(tensBlck_t *ltens, tensBlck_t *dtens,
@@ -7932,22 +6987,24 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
        # ltens - left tensor argument (initialized!);
        # dtens - destination tensor argument;
        # coh_ctrl - one of the COPY_XX parameters regulating the data presence
-    for each tensor argument; # sycl_task - pointer to an empty (clean) CUDA
-    task; # gpu_id - suggested GPU ID on which the operation is to be scheduled
-    (-1: defaults to the optimal one); # conj_bits - tensor argument complex
-    conjugation bits, one bit per argument: {0:D,1:L}; OUTPUT: # dtens - updated
-    destination tensor; # sycl_task - recorded SYCL task (either successfully
-    scheduled or failed). NOTES: # If the tensor operation has been scheduled
-    successfully, a recorded (active) SYCL task will be returned along with zero
-    return status. A scheduling error results in either a negative (at early
-    stages) or positive (at later stages) return status. In the former case the
-    SYCL task is left clean, while at the latter case it will be recorded as
-    failed (error). # Special return statuses TRY_LATER and DEVICE_UNABLE are
-    not errors but merely indicators of the current or permanent lack of
-    resources, respectively. However, the SYCL task status in these cases will
-    still be set to an error (always check the function return status!). # If
-    <gpu_id> is out of the legitimate GPU range, it will be replaced by an
-    optimal one, based on argument residence and the current load of GPU(s).
+       for each tensor argument; # sycl_task - pointer to an empty (clean) CUDA
+       task; # gpu_id - suggested GPU ID on which the operation is to be
+    scheduled
+       (-1: defaults to the optimal one); # conj_bits - tensor argument complex
+       conjugation bits, one bit per argument: {0:D,1:L}; OUTPUT: # dtens -
+    updated destination tensor; # sycl_task - recorded SYCL task (either
+    successfully scheduled or failed). NOTES: # If the tensor operation has been
+    scheduled successfully, a recorded (active) SYCL task will be returned along
+    with zero return status. A scheduling error results in either a negative (at
+    early stages) or positive (at later stages) return status. In the former
+    case the SYCL task is left clean, while at the latter case it will be
+    recorded as failed (error). # Special return statuses TRY_LATER and
+    DEVICE_UNABLE are not errors but merely indicators of the current or
+    permanent lack of resources, respectively. However, the SYCL task status in
+    these cases will still be set to an error (always check the function return
+    status!). # If <gpu_id> is out of the legitimate GPU range, it will be
+    replaced by an optimal one, based on argument residence and the current load
+    of GPU(s).
     **/
     try {
   int i, j, drank, lrank, tds_d, tds_l, gpu_d, gpu_l, gpu_num, cur_gpu,
@@ -7957,14 +7014,14 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
   unsigned int coh;
   const unsigned int TWO_BITS_SET = 3; // two right bits are set
   void *darg, *larg;
-  sycl::queue **sycl_queue;
-  sycl::event *cuda_start, *cuda_comput, *cuda_output, *cuda_finish, *dep_event;
-  std::chrono::time_point<std::chrono::high_resolution_clock> cuda_start_ct1;
-  std::chrono::time_point<std::chrono::high_resolution_clock> cuda_comput_ct1;
-  std::chrono::time_point<std::chrono::high_resolution_clock> cuda_output_ct1;
-  std::chrono::time_point<std::chrono::high_resolution_clock> cuda_finish_ct1;
+  cl::sycl::queue **sycl_queue;
+  cl::sycl::event *cuda_start, *cuda_comput, *cuda_output, *cuda_finish,
+      *dep_event;
+  std::chrono::time_point<std::chrono::high_resolution_clock> cuda_start_ct;
+  std::chrono::time_point<std::chrono::high_resolution_clock> cuda_comput_ct;
+  std::chrono::time_point<std::chrono::high_resolution_clock> cuda_output_ct;
+  std::chrono::time_point<std::chrono::high_resolution_clock> cuda_finish_ct;
   int err;
-  const char *err_msg;
 
   // if(DEBUG) printf("\n#DEBUG(tensor_algebra_gpu_intel:gpu_tensor_block_copy):
   // GPU Tensor Copy:\n"); //debug
@@ -8021,7 +7078,7 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
   conj_bits = conj_bits &
               3; // keep only first two bits, one per tensor argument {0:D,1:L}
   if (conj_bits & 1) { // destination tensor argument conjugation = inverse
-                       // conjugation of the left argument
+    // conjugation of the left argument
     conj_bits = conj_bits ^ 3; // XOR with 0b11 will invert bits
   }
   conj_l = 0;
@@ -8041,30 +7098,7 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
     return -29; // destination tensor source device id
   if (j == DEV_INTEL_GPU) {
     if (gpu_d != gpu_num) {
-      /*
-        DPCT1003:171:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
-      /*
-        DPCT1031:172:
-        DPC++
-        currently
-        does not
-        support
-        memory access
-        across peer
-        devices. The
-        output
-        parameter(s)
-        are set to 0.
-      */
+      // todo: peer access ???
       err = (*&j = 0, 0);
       if (err != 0 || j == 0)
         return DEVICE_UNABLE; // peer access impossible for this GPU device
@@ -8079,30 +7113,7 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
     return -30; // left tensor source device id
   if (j == DEV_INTEL_GPU) {
     if (gpu_l != gpu_num) {
-      /*
-        DPCT1003:173:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
-      /*
-        DPCT1031:174:
-        DPC++
-        currently
-        does not
-        support
-        memory access
-        across peer
-        devices. The
-        output
-        parameter(s)
-        are set to 0.
-      */
+      // todo: peer access ???
       err = (*&j = 0, 0);
       if (err != 0 || j == 0)
         return DEVICE_UNABLE; // peer access impossible for this GPU device
@@ -8120,21 +7131,7 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
       return -32;
     }
   } // activate the target GPU
-  /*
-    DPCT1010:175:
-    SYCL uses
-    exceptions to
-    report errors
-    and does not
-    use the error
-    codes. The call
-    was replaced
-    with 0. You
-    need to rewrite
-    this code.
-  */
-  err = 0;
-  err = 0; // clear the GPU error status
+
   targ_dev = encode_device_id(DEV_INTEL_GPU, gpu_num); // flat device id
   // Construct a SYCL task (acquire CUDA resources) for the target GPU:
   errc = sycl_task_construct(sycl_task, gpu_num);
@@ -8148,10 +7145,8 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
   }
 
   // *** From this point all error codes must be positive and the SYCL task must
-  // be recorded! ***
-  // Set up tensor arguments (allocates additional resources for each tensor
-  // argument):
-  // Destination argument:
+  // be recorded! *** Set up tensor arguments (allocates additional resources
+  // for each tensor argument): Destination argument:
   errc = sycl_task_set_arg(sycl_task, 0, dtens);
   if (errc) {
     if (errc == TRY_LATER || errc == DEVICE_UNABLE) {
@@ -8179,7 +7174,7 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
       return 2;
     }
   }
-  // Associate CUDA stream and event pointers locally for convenience:
+  // Associate SYCL queue and event pointers locally for convenience:
   sycl_queue = sycl_queue_ptr(sycl_task->gpu_id, sycl_task->queue_hl);
   if (sycl_queue == nullptr) {
     errc = sycl_task_record(sycl_task, coh_ctrl, 4);
@@ -8309,81 +7304,9 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
                         // (because the data is already on the computing GPU)
   }
   // Start scheduling CUDA calls:
-  /*
-    DPCT1012:176:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:177:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_start_ct1 = std::chrono::high_resolution_clock::now();
+  cuda_start_ct = std::chrono::high_resolution_clock::now();
   err = 0;
-  /*
-    DPCT1000:164:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
   if (err != 0) {
-    /*
-      DPCT1001:163:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:178:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
     if (VERBOSE)
       printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_copy): Unable "
              "to record the start event: %s\n",
@@ -8396,71 +7319,10 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
       nullptr) { //`This should be done atomically for thread safety
     dep_event = sycl_event_ptr(LastTask[gpu_num]->gpu_id,
                                LastTask[gpu_num]->event_comput_hl);
-    /*
-      DPCT1003:181:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
-    err = (*dep_event.wait(),
-           0); // input
-    // transfers
-    // should
-    // only
-    // begin
-    // after
-    // the
-    // previous
-    // task
-    // input
-    // transfers
-    // have
+    err = (*dep_event.wait(), 0); // input
+    // transfers should only begin after the previous task input transfers have
     // completed
-    /*
-      DPCT1000:180:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
     if (err != 0) {
-      /*
-        DPCT1001:179:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:182:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
       if (VERBOSE)
         printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_copy): "
                "Unable to create a task dependency: %s\n",
@@ -8472,210 +7334,54 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
   }
   // Schedule forward data transfers for all tensors if needed:
   // Left tensor:
-  if (sycl_task->tens_args[1].const_mem_entry >=
-      0) { // GPU constant memory entry will contain tensor dimension extents
-           // and the matricization permutation (if any)
-    /*
-      DPCT1003:187:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
-    err = (*sycl_queue->memcpy(
-               (char *)(const_args_dims.get_ptr()) +
-                   sizeof(int) *
-                       ((size_t)(MAX_TENSOR_RANK *
-                                 (sycl_task->tens_args[1].const_mem_entry))),
-               (void *)(ltens->shape.dims), sizeof(int) * ((size_t)lrank)),
-           0); // tensor
-    // dimension
-    // extents
-    /*
-      DPCT1000:184:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
-    if (err != 0) {
-      /*
-        DPCT1001:183:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:188:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
+  if (sycl_task->tens_args[1].const_mem_entry >= 0) {
+    // GPU constant memory entry will contain tensor dimension extents
+    // and the matricization permutation (if any)
+    try {
+      (*sycl_queue)
+          ->memcpy(
+              (char *)(const_args_dims.get_ptr()) +
+                  sizeof(int) *
+                      ((size_t)(MAX_TENSOR_RANK *
+                                (sycl_task->tens_args[1].const_mem_entry))),
+              (void *)(ltens->shape.dims),
+              sizeof(int) * ((size_t)lrank)); // tensor dimension extents
+    } catch (cl::sycl::exception const &exc) {
       if (VERBOSE)
-        printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_copy): Left "
-               "tensor dims H2D copy failed: %s\n",
-               err_msg);
+        std::cerr << "#ERROR: tensor dims H2D copy failed: " << exc.what()
+                  << ", at " << __FILE__ << ", line:" << __LINE__ << std::endl;
       errc = sycl_task_record(sycl_task, coh_ctrl, 25);
       errc = gpu_activate(cur_gpu);
       return 25;
     }
     gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)lrank);
-    /*
-      DPCT1003:189:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
-    err = (*sycl_queue->memcpy(
-               (char *)(const_args_prmn.get_ptr()) +
-                   sizeof(int) *
-                       ((size_t)(MAX_TENSOR_RANK *
-                                 (sycl_task->tens_args[1].const_mem_entry))),
-               (void *)(sycl_task->tens_args[1].prmn_p),
-               sizeof(int) * ((size_t)lrank)),
-           0); // tensor
-    // permutation
-    /*
-      DPCT1000:186:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
-    if (err != 0) {
-      /*
-        DPCT1001:185:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:190:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
+    try {
+      (*sycl_queue)
+          ->memcpy(
+              (char *)(const_args_prmn.get_ptr()) +
+                  sizeof(int) *
+                      ((size_t)(MAX_TENSOR_RANK *
+                                (sycl_task->tens_args[1].const_mem_entry))),
+              (void *)(sycl_task->tens_args[1].prmn_p),
+              sizeof(int) * ((size_t)lrank)); // tensor permutation
+    } catch (cl::sycl::exception const &exc) {
       if (VERBOSE)
-        printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_copy): Left "
-               "tensor prmn H2D copy failed: %s\n",
-               err_msg);
+        std::cerr << "#ERROR: tensor prmn H2D copy failed: " << exc.what()
+                  << ", at " << __FILE__ << ", line:" << __LINE__ << std::endl;
       errc = sycl_task_record(sycl_task, coh_ctrl, 26);
       errc = gpu_activate(cur_gpu);
       return 26;
     }
     gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)lrank);
     if (gpu_l != gpu_num) { // data is not on the computing GPU
-      /*
-        DPCT1003:193:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
-      err = (*sycl_queue->memcpy(ltens->dst_rsc->gmem_p,
-                                  ltens->src_rsc->gmem_p, lsize),
-             0);
-      /*
-        DPCT1000:192:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
-      if (err != 0) {
-        /*
-          DPCT1001:191:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:194:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
+      try {
+        (*sycl_queue)
+            ->memcpy(ltens->dst_rsc->gmem_p, ltens->src_rsc->gmem_p, lsize);
+      } catch (cl::sycl::exception const &exc) {
         if (VERBOSE)
-          printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_copy): "
-                 "Left tensor body copy failed: %s\n",
-                 err_msg);
+          std::cerr << "#ERROR: Left tensor body copy failed: " << exc.what()
+                    << ", at " << __FILE__ << ", line:" << __LINE__
+                    << std::endl;
         errc = sycl_task_record(sycl_task, coh_ctrl, 27);
         errc = gpu_activate(cur_gpu);
         return 27;
@@ -8689,81 +7395,9 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
   }
   // Use the destination resource pointers for each tensor argument:
   // Record a SYCL queue:
-  /*
-    DPCT1012:195:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:196:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_comput_ct1 = std::chrono::high_resolution_clock::now();
+  cuda_comput_ct = std::chrono::high_resolution_clock::now();
   err = 0;
-  /*
-    DPCT1000:166:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
   if (err != 0) {
-    /*
-      DPCT1001:165:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:197:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
     if (VERBOSE)
       printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_copy): Unable "
              "to record the compute event: %s\n",
@@ -8774,7 +7408,7 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
   }
   darg = dtens->dst_rsc->gmem_p;
   larg = ltens->dst_rsc->gmem_p;
-// Schedule the appropriate computation kernel:
+  // Schedule the appropriate computation kernel:
   // Permutation kernel:
   if (TRANS_SHMEM == EFF_TRN_ON) {
     bx = 1 + (vol_l - 1) / THRDS_TENSOR_COPY;
@@ -8782,270 +7416,314 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
       bx = MAX_SYCL_BLOCKS;
     switch (ltens->data_kind) {
     case R4:
-      (*sycl_queue)->submit([&](sycl::handler &cgh) {
-        auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-        sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-        sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+        local_accessor<T, 1> buf0_acc(
+            cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+        local_accessor<float, 0> val_acc(cgh);
+        local_accessor<size_t, 1> base_in_acc(
+            cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> base_out_acc(
+            cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> ftb_acc(
+            cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<size_t, 1> gtb_acc(
+            cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> htb_acc(
+            cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> stb_acc(
+            cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> dim_in_acc(
+            cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> dim_out_acc(
+            cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> o2n_acc(cl::sycl::range(32 /*MAX_TENSOR_RANK*/),
+                                       cgh);
+        local_accessor<int, 1> n2o_acc(cl::sycl::range(32 /*MAX_TENSOR_RANK*/),
+                                       cgh);
+        local_accessor<int, 1> pri_acc(cl::sycl::range(32 /*MAX_TENSOR_RANK*/),
+                                       cgh);
+        local_accessor<int, 1> tmp0_acc(cl::sycl::range(32 /*MAX_TENSOR_RANK*/),
+                                        cgh);
+        local_accessor<int, 0> err_code_acc(cgh);
+        local_accessor<int, 0> minor_acc(cgh);
+        local_accessor<int, 0> minor_in_acc(cgh);
+        local_accessor<int, 0> minor_out_acc(cgh);
+        local_accessor<int, 0> s1_ind_acc(cgh);
+        local_accessor<int, 0> s1_ond_acc(cgh);
+        local_accessor<int, 0> s1_step_acc(cgh);
+        local_accessor<int, 0> s1_dim_acc(cgh);
+        local_accessor<int, 0> s2_ind_acc(cgh);
+        local_accessor<int, 0> s2_ond_acc(cgh);
+        local_accessor<int, 0> s2_step_acc(cgh);
+        local_accessor<int, 0> s2_dim_acc(cgh);
+        local_accessor<int, 0> ns1_acc(cgh);
+        local_accessor<int, 0> ns2_acc(cgh);
+        local_accessor<size_t, 0> vol_acc(cgh);
+        local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-        auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-        auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-        auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
+        auto const_args_dims_acc = const_args_dims.get_access(cgh);
+        auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+        auto sycl_task_tens_args_const_mem_entry3 =
+            sycl_task->tens_args[1].const_mem_entry;
 
         cgh.parallel_for(
-            sycl::nd_range(sycl::range(1, 1, bx) *
-                               sycl::range(1, 1, THRDS_TENSOR_COPY),
-                           sycl::range(1, 1, THRDS_TENSOR_COPY)),
-            [=](sycl::nd_item<3> item_ct) {
+            cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+            [=](cl::sycl::nd_item<1> item) {
               gpu_tensor_block_copy_dlf__(
-                  0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                  (float *)(larg), (float *)(darg), item_ct,
-                  const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                  gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                  val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                  base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                  gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                  stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                  dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                  n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                  tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                  minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                  minor_out_acc_ct1.get_pointer(), s1_ind_acc_ct1.get_pointer(),
-                  s1_ond_acc_ct1.get_pointer(), s1_step_acc_ct1.get_pointer(),
-                  s1_dim_acc_ct1.get_pointer(), s2_ind_acc_ct1.get_pointer(),
-                  s2_ond_acc_ct1.get_pointer(), s2_step_acc_ct1.get_pointer(),
-                  s2_dim_acc_ct1.get_pointer(), ns1_acc_ct1.get_pointer(),
-                  ns2_acc_ct1.get_pointer(), vol_acc_ct1.get_pointer(),
-                  vol_ext_acc_ct1.get_pointer());
+                  0, 0, lrank, sycl_task_tens_args_const_mem_entry3,
+                  (float *)(larg), (float *)(darg), item, const_args_dims_acc,
+                  const_args_prmn_acc, gpu_error_count_ptr,
+                  buf0_acc.get_pointer(), val_acc.get_pointer(),
+                  base_in_acc.get_pointer(), base_out_acc.get_pointer(),
+                  ftb_acc.get_pointer(), gtb_acc.get_pointer(),
+                  htb_acc.get_pointer(), stb_acc.get_pointer(),
+                  dim_in_acc.get_pointer(), dim_out_acc.get_pointer(),
+                  o2n_acc.get_pointer(), n2o_acc.get_pointer(),
+                  pri_acc.get_pointer(), tmp0_acc.get_pointer(),
+                  err_code_acc.get_pointer(), minor_acc.get_pointer(),
+                  minor_in_acc.get_pointer(), minor_out_acc.get_pointer(),
+                  s1_ind_acc.get_pointer(), s1_ond_acc.get_pointer(),
+                  s1_step_acc.get_pointer(), s1_dim_acc.get_pointer(),
+                  s2_ind_acc.get_pointer(), s2_ond_acc.get_pointer(),
+                  s2_step_acc.get_pointer(), s2_dim_acc.get_pointer(),
+                  ns1_acc.get_pointer(), ns2_acc.get_pointer(),
+                  vol_acc.get_pointer(), vol_ext_acc.get_pointer());
             });
       });
       break;
     case R8:
-      (*sycl_queue)->submit([&](sycl::handler &cgh) {
-        auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-        sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-        sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+        local_accessor<T, 1> buf0_acc(
+            cl::sycl::range<1>(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+        local_accessor<float, 0> val_acc(cgh);
+        local_accessor<size_t, 1> base_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> base_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> ftb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<size_t, 1> gtb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> htb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> stb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> dim_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> dim_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> o2n_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> n2o_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> pri_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> tmp0_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 0> err_code_acc(cgh);
+        local_accessor<int, 0> minor_acc(cgh);
+        local_accessor<int, 0> minor_in_acc(cgh);
+        local_accessor<int, 0> minor_out_acc(cgh);
+        local_accessor<int, 0> s1_ind_acc(cgh);
+        local_accessor<int, 0> s1_ond_acc(cgh);
+        local_accessor<int, 0> s1_step_acc(cgh);
+        local_accessor<int, 0> s1_dim_acc(cgh);
+        local_accessor<int, 0> s2_ind_acc(cgh);
+        local_accessor<int, 0> s2_ond_acc(cgh);
+        local_accessor<int, 0> s2_step_acc(cgh);
+        local_accessor<int, 0> s2_dim_acc(cgh);
+        local_accessor<int, 0> ns1_acc(cgh);
+        local_accessor<int, 0> ns2_acc(cgh);
+        local_accessor<size_t, 0> vol_acc(cgh);
+        local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-        auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-        auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-        auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
+        auto const_args_dims_acc = const_args_dims.get_access(cgh);
+        auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+        auto sycl_task_tens_args_const_mem_entry3 =
+            sycl_task->tens_args[1].const_mem_entry;
 
         cgh.parallel_for(
-            sycl::nd_range(sycl::range(1, 1, bx) *
-                               sycl::range(1, 1, THRDS_TENSOR_COPY),
-                           sycl::range(1, 1, THRDS_TENSOR_COPY)),
-            [=](sycl::nd_item<3> item_ct) {
+            cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+            [=](cl::sycl::nd_item<1> item) {
               gpu_tensor_block_copy_dlf__(
-                  0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                  (double *)(larg), (double *)(darg), item_ct,
-                  const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                  gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                  val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                  base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                  gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                  stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                  dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                  n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                  tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                  minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                  minor_out_acc_ct1.get_pointer(), s1_ind_acc_ct1.get_pointer(),
-                  s1_ond_acc_ct1.get_pointer(), s1_step_acc_ct1.get_pointer(),
-                  s1_dim_acc_ct1.get_pointer(), s2_ind_acc_ct1.get_pointer(),
-                  s2_ond_acc_ct1.get_pointer(), s2_step_acc_ct1.get_pointer(),
-                  s2_dim_acc_ct1.get_pointer(), ns1_acc_ct1.get_pointer(),
-                  ns2_acc_ct1.get_pointer(), vol_acc_ct1.get_pointer(),
-                  vol_ext_acc_ct1.get_pointer());
+                  0, 0, lrank, sycl_task_tens_args_const_mem_entry3,
+                  (double *)(larg), (double *)(darg), item, const_args_dims_acc,
+                  const_args_prmn_acc, gpu_error_count_ptr,
+                  buf0_acc.get_pointer(), val_acc.get_pointer(),
+                  base_in_acc.get_pointer(), base_out_acc.get_pointer(),
+                  ftb_acc.get_pointer(), gtb_acc.get_pointer(),
+                  htb_acc.get_pointer(), stb_acc.get_pointer(),
+                  dim_in_acc.get_pointer(), dim_out_acc.get_pointer(),
+                  o2n_acc.get_pointer(), n2o_acc.get_pointer(),
+                  pri_acc.get_pointer(), tmp0_acc.get_pointer(),
+                  err_code_acc.get_pointer(), minor_acc.get_pointer(),
+                  minor_in_acc.get_pointer(), minor_out_acc.get_pointer(),
+                  s1_ind_acc.get_pointer(), s1_ond_acc.get_pointer(),
+                  s1_step_acc.get_pointer(), s1_dim_acc.get_pointer(),
+                  s2_ind_acc.get_pointer(), s2_ond_acc.get_pointer(),
+                  s2_step_acc.get_pointer(), s2_dim_acc.get_pointer(),
+                  ns1_acc.get_pointer(), ns2_acc.get_pointer(),
+                  vol_acc.get_pointer(), vol_ext_acc.get_pointer());
             });
       });
       break;
     case C4:
-      (*sycl_queue)->submit([&](sycl::handler &cgh) {
-        auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-        sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-        sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+        local_accessor<T, 1> buf0_acc(
+            cl::sycl::range<1>(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+        local_accessor<float, 0> val_acc(cgh);
+        local_accessor<size_t, 1> base_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> base_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> ftb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<size_t, 1> gtb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> htb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> stb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> dim_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> dim_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> o2n_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> n2o_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> pri_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> tmp0_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 0> err_code_acc(cgh);
+        local_accessor<int, 0> minor_acc(cgh);
+        local_accessor<int, 0> minor_in_acc(cgh);
+        local_accessor<int, 0> minor_out_acc(cgh);
+        local_accessor<int, 0> s1_ind_acc(cgh);
+        local_accessor<int, 0> s1_ond_acc(cgh);
+        local_accessor<int, 0> s1_step_acc(cgh);
+        local_accessor<int, 0> s1_dim_acc(cgh);
+        local_accessor<int, 0> s2_ind_acc(cgh);
+        local_accessor<int, 0> s2_ond_acc(cgh);
+        local_accessor<int, 0> s2_step_acc(cgh);
+        local_accessor<int, 0> s2_dim_acc(cgh);
+        local_accessor<int, 0> ns1_acc(cgh);
+        local_accessor<int, 0> ns2_acc(cgh);
+        local_accessor<size_t, 0> vol_acc(cgh);
+        local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-        auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-        auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-        auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
+        auto const_args_dims_acc = const_args_dims.get_access(cgh);
+        auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+        auto sycl_task_tens_args_const_mem_entry3 =
+            sycl_task->tens_args[1].const_mem_entry;
 
         cgh.parallel_for(
-            sycl::nd_range(sycl::range(1, 1, bx) *
-                               sycl::range(1, 1, THRDS_TENSOR_COPY),
-                           sycl::range(1, 1, THRDS_TENSOR_COPY)),
-            [=](sycl::nd_item<3> item_ct) {
+            cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+            [=](cl::sycl::nd_item<1> item) {
               gpu_tensor_block_copy_dlf__(
-                  0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                  (talshComplex4 *)(larg), (talshComplex4 *)(darg), item_ct,
-                  const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                  gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                  val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                  base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                  gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                  stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                  dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                  n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                  tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                  minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                  minor_out_acc_ct1.get_pointer(), s1_ind_acc_ct1.get_pointer(),
-                  s1_ond_acc_ct1.get_pointer(), s1_step_acc_ct1.get_pointer(),
-                  s1_dim_acc_ct1.get_pointer(), s2_ind_acc_ct1.get_pointer(),
-                  s2_ond_acc_ct1.get_pointer(), s2_step_acc_ct1.get_pointer(),
-                  s2_dim_acc_ct1.get_pointer(), ns1_acc_ct1.get_pointer(),
-                  ns2_acc_ct1.get_pointer(), vol_acc_ct1.get_pointer(),
-                  vol_ext_acc_ct1.get_pointer());
+                  0, 0, lrank, sycl_task_tens_args_const_mem_entry3,
+                  (talshComplex4 *)(larg), (talshComplex4 *)(darg), item,
+                  const_args_dims_acc, const_args_prmn_acc, gpu_error_count_ptr,
+                  buf0_acc.get_pointer(), val_acc.get_pointer(),
+                  base_in_acc.get_pointer(), base_out_acc.get_pointer(),
+                  ftb_acc.get_pointer(), gtb_acc.get_pointer(),
+                  htb_acc.get_pointer(), stb_acc.get_pointer(),
+                  dim_in_acc.get_pointer(), dim_out_acc.get_pointer(),
+                  o2n_acc.get_pointer(), n2o_acc.get_pointer(),
+                  pri_acc.get_pointer(), tmp0_acc.get_pointer(),
+                  err_code_acc.get_pointer(), minor_acc.get_pointer(),
+                  minor_in_acc.get_pointer(), minor_out_acc.get_pointer(),
+                  s1_ind_acc.get_pointer(), s1_ond_acc.get_pointer(),
+                  s1_step_acc.get_pointer(), s1_dim_acc.get_pointer(),
+                  s2_ind_acc.get_pointer(), s2_ond_acc.get_pointer(),
+                  s2_step_acc.get_pointer(), s2_dim_acc.get_pointer(),
+                  ns1_acc.get_pointer(), ns2_acc.get_pointer(),
+                  vol_acc.get_pointer(), vol_ext_acc.get_pointer());
             });
       });
       break;
     case C8:
-      (*sycl_queue)->submit([&](sycl::handler &cgh) {
-        auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-        sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-        sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-        sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+        local_accessor<T, 1> buf0_acc(
+            cl::sycl::range<1>(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+        local_accessor<float, 0> val_acc(cgh);
+        local_accessor<size_t, 1> base_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> base_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> ftb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<size_t, 1> gtb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> htb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> stb_acc(
+            cl::sycl::range<1>(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+        local_accessor<int, 1> dim_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> dim_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> o2n_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> n2o_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> pri_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> tmp0_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 0> err_code_acc(cgh);
+        local_accessor<int, 0> minor_acc(cgh);
+        local_accessor<int, 0> minor_in_acc(cgh);
+        local_accessor<int, 0> minor_out_acc(cgh);
+        local_accessor<int, 0> s1_ind_acc(cgh);
+        local_accessor<int, 0> s1_ond_acc(cgh);
+        local_accessor<int, 0> s1_step_acc(cgh);
+        local_accessor<int, 0> s1_dim_acc(cgh);
+        local_accessor<int, 0> s2_ind_acc(cgh);
+        local_accessor<int, 0> s2_ond_acc(cgh);
+        local_accessor<int, 0> s2_step_acc(cgh);
+        local_accessor<int, 0> s2_dim_acc(cgh);
+        local_accessor<int, 0> ns1_acc(cgh);
+        local_accessor<int, 0> ns2_acc(cgh);
+        local_accessor<size_t, 0> vol_acc(cgh);
+        local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-        auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-        auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-        auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
+        auto const_args_dims_acc = const_args_dims.get_access(cgh);
+        auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+        auto sycl_task_tens_args_const_mem_entry3 =
+            sycl_task->tens_args[1].const_mem_entry;
 
         cgh.parallel_for(
-            sycl::nd_range(sycl::range(1, 1, bx) *
-                               sycl::range(1, 1, THRDS_TENSOR_COPY),
-                           sycl::range(1, 1, THRDS_TENSOR_COPY)),
-            [=](sycl::nd_item<3> item_ct) {
+            cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+            [=](cl::sycl::nd_item<1> item) {
               gpu_tensor_block_copy_dlf__(
-                  0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                  (talshComplex8 *)(larg), (talshComplex8 *)(darg), item_ct,
-                  const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                  gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                  val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                  base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                  gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                  stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                  dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                  n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                  tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                  minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                  minor_out_acc_ct1.get_pointer(), s1_ind_acc_ct1.get_pointer(),
-                  s1_ond_acc_ct1.get_pointer(), s1_step_acc_ct1.get_pointer(),
-                  s1_dim_acc_ct1.get_pointer(), s2_ind_acc_ct1.get_pointer(),
-                  s2_ond_acc_ct1.get_pointer(), s2_step_acc_ct1.get_pointer(),
-                  s2_dim_acc_ct1.get_pointer(), ns1_acc_ct1.get_pointer(),
-                  ns2_acc_ct1.get_pointer(), vol_acc_ct1.get_pointer(),
-                  vol_ext_acc_ct1.get_pointer());
+                  0, 0, lrank, sycl_task_tens_args_const_mem_entry3,
+                  (talshComplex8 *)(larg), (talshComplex8 *)(darg), item,
+                  const_args_dims_acc, const_args_prmn_acc, gpu_error_count_ptr,
+                  buf0_acc.get_pointer(), val_acc.get_pointer(),
+                  base_in_acc.get_pointer(), base_out_acc.get_pointer(),
+                  ftb_acc.get_pointer(), gtb_acc.get_pointer(),
+                  htb_acc.get_pointer(), stb_acc.get_pointer(),
+                  dim_in_acc.get_pointer(), dim_out_acc.get_pointer(),
+                  o2n_acc.get_pointer(), n2o_acc.get_pointer(),
+                  pri_acc.get_pointer(), tmp0_acc.get_pointer(),
+                  err_code_acc.get_pointer(), minor_acc.get_pointer(),
+                  minor_in_acc.get_pointer(), minor_out_acc.get_pointer(),
+                  s1_ind_acc.get_pointer(), s1_ond_acc.get_pointer(),
+                  s1_step_acc.get_pointer(), s1_dim_acc.get_pointer(),
+                  s2_ind_acc.get_pointer(), s2_ond_acc.get_pointer(),
+                  s2_step_acc.get_pointer(), s2_dim_acc.get_pointer(),
+                  ns1_acc.get_pointer(), ns2_acc.get_pointer(),
+                  vol_acc.get_pointer(), vol_ext_acc.get_pointer());
             });
       });
       break;
@@ -9064,114 +7742,126 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
       bx = MAX_SYCL_BLOCKS;
     switch (ltens->data_kind) {
     case R4:
-      (*sycl_queue)->submit([&](sycl::handler &cgh) {
-        auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> n2o_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 0> vol_acc(cgh);
+        local_accessor<size_t, 1> base_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> base_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
 
-        auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-        auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-        auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
+        auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+        auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
+        auto sycl_task_tens_args_const_mem_entry_ct3 =
+            sycl_task->tens_args[1].const_mem_entry;
 
         cgh.parallel_for(
-            sycl::nd_range(sycl::range(1, 1, bx) *
-                               sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                           sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-            [=](sycl::nd_item<3> item_ct) {
+            cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                  THRDS_TENSOR_COPY_SCAT),
+            [=](cl::sycl::nd_item<1> item) {
               gpu_tensor_block_copy_scatter_dlf__(
                   0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                  (float *)(larg), (float *)(darg), item_ct,
-                  const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                  gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                  vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                  base_out_acc_ct1.get_pointer());
+                  (float *)(larg), (float *)(darg), item,
+                  const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                  gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                  vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                  base_out_acc_ct.get_pointer());
             });
       });
       break;
     case R8:
-      (*sycl_queue)->submit([&](sycl::handler &cgh) {
-        auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> n2o_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 0> vol_acc(cgh);
+        local_accessor<size_t, 1> base_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> base_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
 
-        auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-        auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-        auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
+        auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+        auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
+        auto sycl_task_tens_args_const_mem_entry_ct3 =
+            sycl_task->tens_args[1].const_mem_entry;
 
         cgh.parallel_for(
-            sycl::nd_range(sycl::range(1, 1, bx) *
-                               sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                           sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-            [=](sycl::nd_item<3> item_ct) {
+            cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                  THRDS_TENSOR_COPY_SCAT),
+            [=](cl::sycl::nd_item<1> item) {
               gpu_tensor_block_copy_scatter_dlf__(
                   0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                  (double *)(larg), (double *)(darg), item_ct,
-                  const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                  gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                  vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                  base_out_acc_ct1.get_pointer());
+                  (double *)(larg), (double *)(darg), item,
+                  const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                  gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                  vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                  base_out_acc_ct.get_pointer());
             });
       });
       break;
     case C4:
-      (*sycl_queue)->submit([&](sycl::handler &cgh) {
-        auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> n2o_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 0> vol_acc(cgh);
+        local_accessor<size_t, 1> base_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> base_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
 
-        auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-        auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-        auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
+        auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+        auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
+        auto sycl_task_tens_args_const_mem_entry_ct3 =
+            sycl_task->tens_args[1].const_mem_entry;
 
         cgh.parallel_for(
-            sycl::nd_range(sycl::range(1, 1, bx) *
-                               sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                           sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-            [=](sycl::nd_item<3> item_ct) {
+            cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                  THRDS_TENSOR_COPY_SCAT),
+            [=](cl::sycl::nd_item<1> item) {
               gpu_tensor_block_copy_scatter_dlf__(
                   0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                  (talshComplex4 *)(larg), (talshComplex4 *)(darg), item_ct,
-                  const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                  gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                  vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                  base_out_acc_ct1.get_pointer());
+                  (talshComplex4 *)(larg), (talshComplex4 *)(darg), item,
+                  const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                  gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                  vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                  base_out_acc_ct.get_pointer());
             });
       });
       break;
     case C8:
-      (*sycl_queue)->submit([&](sycl::handler &cgh) {
-        auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+      (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+        auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-        sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-        sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<int, 1> n2o_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 0> vol_acc(cgh);
+        local_accessor<size_t, 1> base_in_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
+        local_accessor<size_t, 1> base_out_acc(
+            cl::sycl::range<1>(32 /*MAX_TENSOR_RANK*/), cgh);
 
-        auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-        auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-        auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
+        auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+        auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
+        auto sycl_task_tens_args_const_mem_entry_ct3 =
+            sycl_task->tens_args[1].const_mem_entry;
 
         cgh.parallel_for(
-            sycl::nd_range(sycl::range(1, 1, bx) *
-                               sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                           sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-            [=](sycl::nd_item<3> item_ct) {
+            cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                  THRDS_TENSOR_COPY_SCAT),
+            [=](cl::sycl::nd_item<1> item) {
               gpu_tensor_block_copy_scatter_dlf__(
                   0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                  (talshComplex8 *)(larg), (talshComplex8 *)(darg), item_ct,
-                  const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                  gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                  vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                  base_out_acc_ct1.get_pointer());
+                  (talshComplex8 *)(larg), (talshComplex8 *)(darg), item,
+                  const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                  gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                  vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                  base_out_acc_ct.get_pointer());
             });
       });
       break;
@@ -9185,243 +7875,24 @@ int gpu_tensor_block_copy(const int *cptrn, tensBlck_t *ltens,
     errc = gpu_activate(cur_gpu);
     return 60;
   }
-  // Record a SYCL queue (output ready on GPU):
-  /*
-    DPCT1012:198:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:199:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_output_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  /*
-    DPCT1000:168:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
-  if (err != 0) {
-    /*
-      DPCT1001:167:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:200:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_copy): Unable "
-             "to record the output event: %s\n",
-             err_msg);
-    errc = sycl_task_record(sycl_task, coh_ctrl, 56);
-    errc = gpu_activate(cur_gpu);
-    return 56;
-  }
-  // Transfer back the updated destination tensor if needed ("T","K" coherence
-  // control):
+  // Transfer back the updated destination tensor if needed ("T","K" coherence control):
   coh = (coh_ctrl >> 2) &
         (TWO_BITS_SET); // select bits 2,3 (destination tensor coherence)
   if (gpu_d != gpu_num && coh >= 2) { // data is not on the computing GPU and
                                       // coherence control = 2("T") or (3)"K":
-    /*
-      DPCT1003:203:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
-    err = (*sycl_queue->memcpy(dtens->src_rsc->gmem_p, dtens->dst_rsc->gmem_p,
-                                dsize),
-           0);
-    /*
-      DPCT1000:202:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
-    if (err != 0) {
-      /*
-        DPCT1001:201:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:204:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
+    try {
+      (*sycl_queue)
+          ->memcpy(dtens->src_rsc->gmem_p, dtens->dst_rsc->gmem_p, dsize);
+    } catch (cl::sycl::exception const &exc) {
       if (VERBOSE)
-        printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_copy): "
-               "Destination tensor body back copy failed: %s\n",
-               err_msg);
+        std::cerr << "#ERROR: Destination tensor body back copy failed: "
+                  << exc.what() << ", at " << __FILE__ << ", line:" << __LINE__
+                  << std::endl;
       errc = sycl_task_record(sycl_task, coh_ctrl, 57);
       errc = gpu_activate(cur_gpu);
       return 57;
     }
     gpu_stats[gpu_num].traffic_out += dsize;
-  }
-  // Record a SYCL queue (task finished):
-  /*
-    DPCT1012:205:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:206:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_finish_ct1 = std::chrono::high_resolution_clock::now();
-  err = 0;
-  /*
-    DPCT1000:170:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
-  if (err != 0) {
-    /*
-      DPCT1001:169:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:207:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
-    if (VERBOSE)
-      printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_copy): Unable "
-             "to record the finish event: %s\n",
-             err_msg);
-    errc = sycl_task_record(sycl_task, coh_ctrl, 58);
-    errc = gpu_activate(cur_gpu);
-    return 58;
   }
   // Record the successfully scheduled SYCL task and update the Last Task:
   errc = sycl_task_record(sycl_task, coh_ctrl, 0);
@@ -9482,10 +7953,10 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
 
   sycl::queue **sycl_stream;
   sycl::event *sycl_start, *sycl_comput, *sycl_output, *sycl_finish, *dep_event;
-  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_start_ct1;
-  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_comput_ct1;
-  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_output_ct1;
-  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_finish_ct1;
+  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_start_ct;
+  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_comput_ct;
+  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_output_ct;
+  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_finish_ct;
 
   int err;
   const char *err_msg;
@@ -9738,7 +8209,7 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
     }
     dtens->dst_rsc =
         dtens->src_rsc; // destination and source resources are the same
-                        // (because the data is already on the computing GPU)
+    // (because the data is already on the computing GPU)
   }
   //  Left tensor:
   if (ltens->dst_rsc == ltens->src_rsc)
@@ -9781,7 +8252,7 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
     }
     ltens->dst_rsc =
         ltens->src_rsc; // destination and source resources are the same
-                        // (because the data is already on the computing GPU)
+    // (because the data is already on the computing GPU)
   }
   // Set up temporary memory resources in all tensors if needed (because of
   // out-of-place tensor transpose):
@@ -9844,77 +8315,15 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
     }
   }
   // Start scheduling SYCL calls:
-  cuda_start_ct1 = std::chrono::high_resolution_clock::now();
+  cuda_start_ct = std::chrono::high_resolution_clock::now();
 
   if (LastTask[gpu_num] !=
       nullptr) { //`This should be done atomically for thread safety
     dep_event = sycl_event_ptr(LastTask[gpu_num]->gpu_id,
                                LastTask[gpu_num]->event_comput_hl);
-    /*
-      DPCT1003:226:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
-    err = (*dep_event.wait(),
-           0); // input
-    // transfers
-    // should
-    // only
-    // begin
-    // after
-    // the
-    // previous
-    // task
-    // input
-    // transfers
-    // have
-    // completed
-    /*
-      DPCT1000:225:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
+    dep_event->wait(); // input transfers should only begin after the previous
+                       // task input transfers have completed
     if (err != 0) {
-      /*
-        DPCT1001:224:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:227:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
       if (VERBOSE)
         printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): "
                "Unable to create a task dependency: %s\n",
@@ -9926,133 +8335,43 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
   }
   // Schedule forward data transfers for all tensors if needed:
   // Left tensor:
-  if (sycl_task->tens_args[1].const_mem_entry >=
-      0) { // GPU constant memory entry will contain tensor dimension extents
-           // and the matricization permutation (if any)
-    (*sycl_queue)
-        ->memcpy((char *)(const_args_dims.get_ptr()) +
-                     sizeof(int) *
-                         ((size_t)(MAX_TENSOR_RANK *
-                                   (sycl_task->tens_args[1].const_mem_entry))),
-                 (void *)(ltens->shape.dims),
-                 sizeof(int) * ((size_t)lrank)); // tensor dimension extents
-    /*
-      DPCT1000:229:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
-    if (err != 0) {
-      /*
-        DPCT1001:228:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:231:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
+  if (sycl_task->tens_args[1].const_mem_entry >= 0) {
+    // GPU constant memory entry will contain tensor dimension extents
+    // and the matricization permutation (if any)
+    try {
+      (*sycl_queue)
+          ->memcpy(
+              (char *)(const_args_dims.get_ptr()) +
+                  sizeof(int) *
+                      ((size_t)(MAX_TENSOR_RANK *
+                                (sycl_task->tens_args[1].const_mem_entry))),
+              (void *)(ltens->shape.dims),
+              sizeof(int) * ((size_t)lrank)); // tensor dimension extents
+    } catch (cl::sycl::exception const &exc) {
       if (VERBOSE)
-        printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): Left "
-               "tensor dims H2D copy failed: %s\n",
-               err_msg);
+        std::cerr << "#ERROR: tensor dims H2D copy failed: " << exc.what()
+                  << ", at " << __FILE__ << ", line:" << __LINE__ << std::endl;
       errc = sycl_task_record(sycl_task, coh_ctrl, 25);
       errc = gpu_activate(cur_gpu);
       return 25;
     }
     gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)lrank);
     if (perm_l == YEP) {
-      /*
-        DPCT1003:234:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
-      err = (*sycl_queue->memcpy(
-                 (char *)(const_args_prmn.get_ptr()) +
-                     sizeof(int) *
-                         ((size_t)(MAX_TENSOR_RANK *
-                                   (sycl_task->tens_args[1].const_mem_entry))),
-                 (void *)(sycl_task->tens_args[1].prmn_p),
-                 sizeof(int) * ((size_t)lrank)),
-             0); // tensor matricization permutation
-      /*
-        DPCT1000:233:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
-      if (err != 0) {
-        /*
-          DPCT1001:232:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:235:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
+      try {
+        (*sycl_queue)
+            ->memcpy(
+                (char *)(const_args_prmn.get_ptr()) +
+                    sizeof(int) *
+                        ((size_t)(MAX_TENSOR_RANK *
+                                  (sycl_task->tens_args[1].const_mem_entry))),
+                (void *)(sycl_task->tens_args[1].prmn_p),
+                sizeof(int) *
+                    ((size_t)lrank)); // tensor matricization permutation
+      } catch (cl::sycl::exception const &exc) {
         if (VERBOSE)
-          printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): "
-                 "Left tensor prmn H2D copy failed: %s\n",
-                 err_msg);
+          std::cerr << "#ERROR: Left tensor prmn H2D copy failed: "
+                    << exc.what() << ", at " << __FILE__
+                    << ", line:" << __LINE__ << std::endl;
         errc = sycl_task_record(sycl_task, coh_ctrl, 26);
         errc = gpu_activate(cur_gpu);
         return 26;
@@ -10060,68 +8379,14 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
       gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)lrank);
     }
     if (gpu_l != gpu_num) { // data is not on the computing GPU
-      /*
-        DPCT1003:238:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
-      err = (*sycl_queue->memcpy(ltens->dst_rsc->gmem_p,
-                                  ltens->src_rsc->gmem_p, lsize),
-             0);
-      /*
-        DPCT1000:237:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
-      if (err != 0) {
-        /*
-          DPCT1001:236:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:239:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
+      try {
+        (*sycl_queue)
+            ->memcpy(ltens->dst_rsc->gmem_p, ltens->src_rsc->gmem_p, lsize);
+      } catch (cl::sycl::exception const &exc) {
         if (VERBOSE)
-          printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): "
-                 "Left tensor body copy failed: %s\n",
-                 err_msg);
+          std::cerr << "#ERROR: Left tensor body copy failed: " << exc.what()
+                    << ", at " << __FILE__ << ", line:" << __LINE__
+                    << std::endl;
         errc = sycl_task_record(sycl_task, coh_ctrl, 27);
         errc = gpu_activate(cur_gpu);
         return 27;
@@ -10134,146 +8399,44 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
     return 28;
   }
   // Destination tensor:
-  if (sycl_task->tens_args[0].const_mem_entry >=
-      0) { // GPU constant memory entry will contain tensor dimension extents
-           // and the matricization permutation (if any)
-    /*
-      DPCT1003:242:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
-    err = (*sycl_queue->memcpy(
-               (char *)(const_args_dims.get_ptr()) +
-                   sizeof(int) *
-                       ((size_t)(MAX_TENSOR_RANK *
-                                 (sycl_task->tens_args[0].const_mem_entry))),
-               (void *)(dtens->shape.dims), sizeof(int) * ((size_t)drank)),
-           0); // tensor
-    // dimension
-    // extents
-    /*
-      DPCT1000:241:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
-    if (err != 0) {
-      /*
-        DPCT1001:240:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:243:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
+  if (sycl_task->tens_args[0].const_mem_entry >= 0) {
+    // GPU constant memory entry will contain tensor dimension extents
+    // and the matricization permutation (if any)
+    try {
+      (*sycl_queue)
+          ->memcpy(
+              (char *)(const_args_dims.get_ptr()) +
+                  sizeof(int) *
+                      ((size_t)(MAX_TENSOR_RANK *
+                                (sycl_task->tens_args[0].const_mem_entry))),
+              (void *)(dtens->shape.dims),
+              sizeof(int) * ((size_t)drank)); // tensor dimension extents
+    } catch (cl::sycl::exception const &exc) {
       if (VERBOSE)
-        printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): "
-               "Destination tensor dims H2D copy failed: %s\n",
-               err_msg);
+        std::cerr << "#ERROR: Destination tensor dims H2D copy failed: "
+                  << exc.what() << ", at " << __FILE__ << ", line:" << __LINE__
+                  << std::endl;
       errc = sycl_task_record(sycl_task, coh_ctrl, 33);
       errc = gpu_activate(cur_gpu);
       return 33;
     }
     gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)drank);
     if (perm_d == YEP) {
-      /*
-        DPCT1003:246:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
-      err = (*sycl_queue->memcpy(
-                 (char *)(const_args_prmn.get_ptr()) +
-                     sizeof(int) *
-                         ((size_t)(MAX_TENSOR_RANK *
-                                   (sycl_task->tens_args[0].const_mem_entry))),
-                 (void *)(sycl_task->tens_args[0].prmn_p),
-                 sizeof(int) * ((size_t)drank)),
-             0); // tensor matricization permutation
-      /*
-        DPCT1000:245:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
-      if (err != 0) {
-        /*
-          DPCT1001:244:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:247:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
+      try {
+        (*sycl_queue)
+            ->memcpy(
+                (char *)(const_args_prmn.get_ptr()) +
+                    sizeof(int) *
+                        ((size_t)(MAX_TENSOR_RANK *
+                                  (sycl_task->tens_args[0].const_mem_entry))),
+                (void *)(sycl_task->tens_args[0].prmn_p),
+                sizeof(int) *
+                    ((size_t)drank)); // tensor matricization permutation
+      } catch (cl::sycl::exception const &exc) {
         if (VERBOSE)
-          printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): "
-                 "Destination tensor prmn H2D copy failed: %s\n",
-                 err_msg);
+          std::cerr << "#ERROR: Destination tensor prmn H2D copy failed: "
+                    << exc.what() << ", at " << __FILE__
+                    << ", line:" << __LINE__ << std::endl;
         errc = sycl_task_record(sycl_task, coh_ctrl, 34);
         errc = gpu_activate(cur_gpu);
         return 34;
@@ -10281,68 +8444,14 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
       gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)drank);
     }
     if (gpu_d != gpu_num) { // data is not on the computing GPU
-      /*
-        DPCT1003:250:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
-      err = (*sycl_queue->memcpy(dtens->dst_rsc->gmem_p,
-                                  dtens->src_rsc->gmem_p, dsize),
-             0);
-      /*
-        DPCT1000:249:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
-      if (err != 0) {
-        /*
-          DPCT1001:248:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:251:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
+      try {
+        (*sycl_queue)
+            ->memcpy(dtens->dst_rsc->gmem_p, dtens->src_rsc->gmem_p, dsize);
+      } catch (cl::sycl::exception const &exc) {
         if (VERBOSE)
-          printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): "
-                 "Destination tensor body copy failed: %s\n",
-                 err_msg);
+          std::cerr << "#ERROR: Destination tensor body copy failed: "
+                    << exc.what() << ", at " << __FILE__
+                    << ", line:" << __LINE__ << std::endl;
         errc = sycl_task_record(sycl_task, coh_ctrl, 35);
         errc = gpu_activate(cur_gpu);
         return 35;
@@ -10356,81 +8465,9 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
   }
   // Schedule tensor transposes if needed:
   // Record a SYCL queue:
-  /*
-    DPCT1012:252:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:253:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_comput_ct1 = std::chrono::high_resolution_clock::now();
+  cuda_comput_ct = std::chrono::high_resolution_clock::now();
   err = 0;
-  /*
-    DPCT1000:211:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
   if (err != 0) {
-    /*
-      DPCT1001:210:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:254:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
     if (VERBOSE)
       printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): Unable "
              "to record the compute event: %s\n",
@@ -10447,278 +8484,330 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
         bx = MAX_SYCL_BLOCKS;
       switch (dtens->data_kind) {
       case R4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-          auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
-          auto dtens_dst_rsc_gmem_p_ct4 = (float *)(dtens->dst_rsc->gmem_p);
-          auto dtens_tmp_rsc_gmem_p_ct5 = (float *)(dtens->tmp_rsc->gmem_p);
+          auto const_args_dims_acc = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+          auto sycl_task_tens_args_const_mem_entry3 =
+              sycl_task->tens_args[0].const_mem_entry;
+          auto dtens_dst_rsc_gmem_p4 = (float *)(dtens->dst_rsc->gmem_p);
+          auto dtens_tmp_rsc_gmem_p5 = (float *)(dtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
-                    0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    0, 1, drank, sycl_task_tens_args_const_mem_entry3,
+                    dtens_dst_rsc_gmem_p4, dtens_tmp_rsc_gmem_p5, item,
+                    const_args_dims_acc, const_args_prmn_acc,
+                    gpu_error_count_ptr, buf0_acc.get_pointer(),
+                    val_acc.get_pointer(), base_in_acc.get_pointer(),
+                    base_out_acc.get_pointer(), ftb_acc.get_pointer(),
+                    gtb_acc.get_pointer(), htb_acc.get_pointer(),
+                    stb_acc.get_pointer(), dim_in_acc.get_pointer(),
+                    dim_out_acc.get_pointer(), o2n_acc.get_pointer(),
+                    n2o_acc.get_pointer(), pri_acc.get_pointer(),
+                    tmp0_acc.get_pointer(), err_code_acc.get_pointer(),
+                    minor_acc.get_pointer(), minor_in_acc.get_pointer(),
+                    minor_out_acc.get_pointer(), s1_ind_acc.get_pointer(),
+                    s1_ond_acc.get_pointer(), s1_step_acc.get_pointer(),
+                    s1_dim_acc.get_pointer(), s2_ind_acc.get_pointer(),
+                    s2_ond_acc.get_pointer(), s2_step_acc.get_pointer(),
+                    s2_dim_acc.get_pointer(), ns1_acc.get_pointer(),
+                    ns2_acc.get_pointer(), vol_acc.get_pointer(),
+                    vol_ext_acc.get_pointer());
               });
         });
         break;
       case R8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-          auto sycl_task_tens_args_const_mem_entry_ct3 = ycl_task->tens_args[0].const_mem_entry;
-          auto dtens_dst_rsc_gmem_p_ct4 = (double *)(dtens->dst_rsc->gmem_p);
-          auto dtens_tmp_rsc_gmem_p_ct5 = (double *)(dtens->tmp_rsc->gmem_p);
+          auto const_args_dims_acc = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+          auto sycl_task_tens_args_const_mem_entry3 =
+              sycl_task->tens_args[0].const_mem_entry;
+          auto dtens_dst_rsc_gmem_p4 = (double *)(dtens->dst_rsc->gmem_p);
+          auto dtens_tmp_rsc_gmem_p5 = (double *)(dtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
-                    0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    0, 1, drank, sycl_task_tens_args_const_mem_entry3,
+                    dtens_dst_rsc_gmem_p4, dtens_tmp_rsc_gmem_p5, item,
+                    const_args_dims_acc, const_args_prmn_acc,
+                    gpu_error_count_ptr, buf0_acc.get_pointer(),
+                    val_acc.get_pointer(), base_in_acc.get_pointer(),
+                    base_out_acc.get_pointer(), ftb_acc.get_pointer(),
+                    gtb_acc.get_pointer(), htb_acc.get_pointer(),
+                    stb_acc.get_pointer(), dim_in_acc.get_pointer(),
+                    dim_out_acc.get_pointer(), o2n_acc.get_pointer(),
+                    n2o_acc.get_pointer(), pri_acc.get_pointer(),
+                    tmp0_acc.get_pointer(), err_code_acc.get_pointer(),
+                    minor_acc.get_pointer(), minor_in_acc.get_pointer(),
+                    minor_out_acc.get_pointer(), s1_ind_acc.get_pointer(),
+                    s1_ond_acc.get_pointer(), s1_step_acc.get_pointer(),
+                    s1_dim_acc.get_pointer(), s2_ind_acc.get_pointer(),
+                    s2_ond_acc.get_pointer(), s2_step_acc.get_pointer(),
+                    s2_dim_acc.get_pointer(), ns1_acc.get_pointer(),
+                    ns2_acc.get_pointer(), vol_acc.get_pointer(),
+                    vol_ext_acc.get_pointer());
               });
         });
         break;
       case C4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-          auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
-          auto dtens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
-          auto dtens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
+          auto const_args_dims_acc = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+          auto sycl_task_tens_args_const_mem_entry3 =
+              sycl_task->tens_args[0].const_mem_entry;
+          auto dtens_dst_rsc_gmem_p4 =
+              (talshComplex4 *)(dtens->dst_rsc->gmem_p);
+          auto dtens_tmp_rsc_gmem_p5 =
+              (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
-                    0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    0, 1, drank, sycl_task_tens_args_const_mem_entry3,
+                    dtens_dst_rsc_gmem_p4, dtens_tmp_rsc_gmem_p5, item,
+                    const_args_dims_acc, const_args_prmn_acc,
+                    gpu_error_count_ptr, buf0_acc.get_pointer(),
+                    val_acc.get_pointer(), base_in_acc.get_pointer(),
+                    base_out_acc.get_pointer(), ftb_acc.get_pointer(),
+                    gtb_acc.get_pointer(), htb_acc.get_pointer(),
+                    stb_acc.get_pointer(), dim_in_acc.get_pointer(),
+                    dim_out_acc.get_pointer(), o2n_acc.get_pointer(),
+                    n2o_acc.get_pointer(), pri_acc.get_pointer(),
+                    tmp0_acc.get_pointer(), err_code_acc.get_pointer(),
+                    minor_acc.get_pointer(), minor_in_acc.get_pointer(),
+                    minor_out_acc.get_pointer(), s1_ind_acc.get_pointer(),
+                    s1_ond_acc.get_pointer(), s1_step_acc.get_pointer(),
+                    s1_dim_acc.get_pointer(), s2_ind_acc.get_pointer(),
+                    s2_ond_acc.get_pointer(), s2_step_acc.get_pointer(),
+                    s2_dim_acc.get_pointer(), ns1_acc.get_pointer(),
+                    ns2_acc.get_pointer(), vol_acc.get_pointer(),
+                    vol_ext_acc.get_pointer());
               });
         });
         break;
       case C8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-          auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
-          auto dtens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(dtens->dst_rsc->gmem_p);
-          auto dtens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(dtens->tmp_rsc->gmem_p);
+          auto const_args_dims_acc = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+          auto sycl_task_tens_args_const_mem_entry3 =
+              sycl_task->tens_args[0].const_mem_entry;
+          auto dtens_dst_rsc_gmem_p4 =
+              (talshComplex8 *)(dtens->dst_rsc->gmem_p);
+          auto dtens_tmp_rsc_gmem_p5 =
+              (talshComplex8 *)(dtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
-                    0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    0, 1, drank, sycl_task_tens_args_const_mem_entry3,
+                    dtens_dst_rsc_gmem_p4, dtens_tmp_rsc_gmem_p5, item,
+                    const_args_dims_acc, const_args_prmn_acc,
+                    gpu_error_count_ptr, buf0_acc.get_pointer(),
+                    val_acc.get_pointer(), base_in_acc.get_pointer(),
+                    base_out_acc.get_pointer(), ftb_acc.get_pointer(),
+                    gtb_acc.get_pointer(), htb_acc.get_pointer(),
+                    stb_acc.get_pointer(), dim_in_acc.get_pointer(),
+                    dim_out_acc.get_pointer(), o2n_acc.get_pointer(),
+                    n2o_acc.get_pointer(), pri_acc.get_pointer(),
+                    tmp0_acc.get_pointer(), err_code_acc.get_pointer(),
+                    minor_acc.get_pointer(), minor_in_acc.get_pointer(),
+                    minor_out_acc.get_pointer(), s1_ind_acc.get_pointer(),
+                    s1_ond_acc.get_pointer(), s1_step_acc.get_pointer(),
+                    s1_dim_acc.get_pointer(), s2_ind_acc.get_pointer(),
+                    s2_ond_acc.get_pointer(), s2_step_acc.get_pointer(),
+                    s2_dim_acc.get_pointer(), ns1_acc.get_pointer(),
+                    ns2_acc.get_pointer(), vol_acc.get_pointer(),
+                    vol_ext_acc.get_pointer());
               });
         });
         break;
@@ -10737,122 +8826,130 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
         bx = MAX_SYCL_BLOCKS;
       switch (dtens->data_kind) {
       case R4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_dst_rsc_gmem_p_ct4 = (float *)(dtens->dst_rsc->gmem_p);
           auto dtens_tmp_rsc_gmem_p_ct5 = (float *)(dtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case R8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_dst_rsc_gmem_p_ct4 = (double *)(dtens->dst_rsc->gmem_p);
           auto dtens_tmp_rsc_gmem_p_ct5 = (double *)(dtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case C4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
           auto dtens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case C8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(dtens->dst_rsc->gmem_p);
           auto dtens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(dtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
@@ -10878,278 +8975,322 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
         bx = MAX_SYCL_BLOCKS;
       switch (ltens->data_kind) {
       case R4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (float *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (float *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
       case R8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-	  sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (double *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (double *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
       case C4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
       case C8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
@@ -11168,122 +9309,130 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
         bx = MAX_SYCL_BLOCKS;
       switch (ltens->data_kind) {
       case R4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (float *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (float *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case R8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (double *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (double *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case C4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case C8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
@@ -11308,54 +9457,48 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
     bx = MAX_SYCL_BLOCKS;
   switch (dtens->data_kind) {
   case R4:
-    (*sycl_queue)->submit([&](sycl::handler &cgh) {
-      cgh.parallel_for(sycl::nd_range(sycl::range(1, 1, bx) *
-                                          sycl::range(1, 1, THRDS_ARRAY_ADD),
-                                      sycl::range(1, 1, THRDS_ARRAY_ADD)),
-                       [=](sycl::nd_item<3> item_ct) {
-                         gpu_array_add__(vol_d, (float *)darg, (float *)larg,
-                                         (float)scale_real, item_ct, 0);
-                       });
+    (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+      cgh.parallel_for(
+          cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
+          [=](cl::sycl::nd_item<1> item) {
+            gpu_array_add__(vol_d, (float *)darg, (float *)larg,
+                            (float)scale_real, item, 0);
+          });
     });
     gpu_stats[gpu_num].flops += 2.0 * ((double)(dsize)); // 1 mul, 1 add SP
     break;
   case R8:
-    (*sycl_queue)->submit([&](sycl::handler &cgh) {
-      cgh.parallel_for(sycl::nd_range(sycl::range(1, 1, bx) *
-                                          sycl::range(1, 1, THRDS_ARRAY_ADD),
-                                      sycl::range(1, 1, THRDS_ARRAY_ADD)),
-                       [=](sycl::nd_item<3> item_ct) {
-                         gpu_array_add__(vol_d, (double *)darg, (double *)larg,
-                                         scale_real, item_ct, 0);
-                       });
+    (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+      cgh.parallel_for(
+          cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
+          [=](cl::sycl::nd_item<1> item) {
+            gpu_array_add__(vol_d, (double *)darg, (double *)larg, scale_real,
+                            item, 0);
+          });
     });
     gpu_stats[gpu_num].flops += 2.0 * ((double)(dsize)); // 1 mul, 1 add DP
     break;
   case C4:
     scale_cmplx4 = talshComplex4Set((float)scale_real, (float)scale_imag);
-    (*sycl_queue)->submit([&](sycl::handler &cgh) {
-      cgh.parallel_for(sycl::nd_range(sycl::range(1, 1, bx) *
-                                          sycl::range(1, 1, THRDS_ARRAY_ADD),
-                                      sycl::range(1, 1, THRDS_ARRAY_ADD)),
-                       [=](sycl::nd_item<3> item_ct) {
-                         gpu_array_add__(vol_d, (talshComplex4 *)darg,
-                                         (talshComplex4 *)larg, scale_cmplx4,
-                                         item_ct, conj_l);
-                       });
+    (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+      cgh.parallel_for(
+          cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
+          [=](cl::sycl::nd_item<1> item) {
+            gpu_array_add__(vol_d, (talshComplex4 *)darg, (talshComplex4 *)larg,
+                            scale_cmplx4, item, conj_l);
+          });
     });
     gpu_stats[gpu_num].flops += 8.0 * ((double)(dsize)); // 4 mul, 4 add SP
     break;
   case C8:
     scale_cmplx8 = talshComplex8Set(scale_real, scale_imag);
-    (*sycl_queue)->submit([&](sycl::handler &cgh) {
-      cgh.parallel_for(sycl::nd_range(sycl::range(1, 1, bx) *
-                                          sycl::range(1, 1, THRDS_ARRAY_ADD),
-                                      sycl::range(1, 1, THRDS_ARRAY_ADD)),
-                       [=](sycl::nd_item<3> item_ct) {
-                         gpu_array_add__(vol_d, (talshComplex8 *)darg,
-                                         (talshComplex8 *)larg, scale_cmplx8,
-                                         item_ct, conj_l);
-                       });
+    (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+      cgh.parallel_for(
+          cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
+          [=](cl::sycl::nd_item<1> item) {
+            gpu_array_add__(vol_d, (talshComplex8 *)darg, (talshComplex8 *)larg,
+                            scale_cmplx8, item, conj_l);
+          });
     });
     gpu_stats[gpu_num].flops += 8.0 * ((double)(dsize)); // 4 mul, 4 add DP
     break;
@@ -11373,278 +9516,322 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
         bx = MAX_SYCL_BLOCKS;
       switch (dtens->data_kind) {
       case R4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (float *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (float *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
       case R8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (double *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (double *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
       case C4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
       case C8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (talshComplex8 *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (talshComplex8 *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
@@ -11663,122 +9850,130 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
         bx = MAX_SYCL_BLOCKS;
       switch (dtens->data_kind) {
       case R4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (float *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (float *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case R8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (double *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (double *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case C4:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case C8:
-        (*sycl_queue)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_queue)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (talshComplex8 *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (talshComplex8 *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
@@ -11794,81 +9989,9 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
     }
   }
   // Record a SYCL queue (output ready on GPU):
-  /*
-    DPCT1012:255:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:256:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_output_ct1 = std::chrono::high_resolution_clock::now();
+  cuda_output_ct = std::chrono::high_resolution_clock::now();
   err = 0;
-  /*
-    DPCT1000:213:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
   if (err != 0) {
-    /*
-      DPCT1001:212:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:257:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
     if (VERBOSE)
       printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): Unable "
              "to record the output event: %s\n",
@@ -11883,60 +10006,9 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
         (TWO_BITS_SET); // select bits 2,3 (destination tensor coherence)
   if (gpu_d != gpu_num && coh >= 2) { // data is not on the computing GPU and
                                       // coherence control = 2("T") or (3)"K":
-    /*
-      DPCT1003:260:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
-    err = (*sycl_queue->memcpy(dtens->src_rsc->gmem_p, dtens->dst_rsc->gmem_p,
-                                dsize),
-           0);
-    /*
-      DPCT1000:259:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
+    (*sycl_queue)
+        ->memcpy(dtens->src_rsc->gmem_p, dtens->dst_rsc->gmem_p, dsize);
     if (err != 0) {
-      /*
-        DPCT1001:258:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:261:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
       if (VERBOSE)
         printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): "
                "Destination tensor body back copy failed: %s\n",
@@ -11948,81 +10020,9 @@ int gpu_tensor_block_add(const int *cptrn, tensBlck_t *ltens, tensBlck_t *dtens,
     gpu_stats[gpu_num].traffic_out += dsize;
   }
   // Record a SYCL queue (task finished):
-  /*
-    DPCT1012:262:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:263:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  cuda_finish_ct1 = std::chrono::high_resolution_clock::now();
+  cuda_finish_ct = std::chrono::high_resolution_clock::now();
   err = 0;
-  /*
-    DPCT1000:215:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
   if (err != 0) {
-    /*
-      DPCT1001:214:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:264:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
     if (VERBOSE)
       printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_add): Unable "
              "to record the finish event: %s\n",
@@ -12096,10 +10096,10 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
   talshComplex8 scale_cmplx8;
   sycl::queue **sycl_stream;
   sycl::event *sycl_start, *sycl_comput, *sycl_output, *sycl_finish, *dep_event;
-  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_start_ct1;
-  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_comput_ct1;
-  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_output_ct1;
-  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_finish_ct1;
+  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_start_ct;
+  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_comput_ct;
+  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_output_ct;
+  std::chrono::time_point<std::chrono::high_resolution_clock> sycl_finish_ct;
   int err;
   const char *err_msg;
 #ifndef NO_BLAS
@@ -12692,42 +10692,7 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     }
   }
   // Start scheduling CUDA calls:
-  /*
-    DPCT1012:280:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:281:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  sycl_start_ct1 = std::chrono::high_resolution_clock::now();
+  sycl_start_ct = std::chrono::high_resolution_clock::now();
   errc = sycl_task_record(sycl_task, coh_ctrl, 25);
   errc = gpu_activate(cur_gpu);
   return 25;
@@ -12736,17 +10701,6 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       nullptr) { //`This should be done atomically for thread safety
     dep_event = sycl_event_ptr(LastTask[gpu_num]->gpu_id,
                                LastTask[gpu_num]->event_comput_hl);
-    /*
-      DPCT1003:285:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
     err = (*dep_event.wait(),
            0); // input
     // transfers
@@ -12761,46 +10715,7 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     // transfers
     // have
     // completed
-    /*
-      DPCT1000:284:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
     if (err != 0) {
-      /*
-        DPCT1001:283:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:286:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
       if (VERBOSE)
         printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                "dlf): Unable to create a task dependency: %s\n",
@@ -12815,17 +10730,6 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
   if (sycl_task->tens_args[1].const_mem_entry >=
       0) { // GPU constant memory entry will contain tensor dimension extents
            // and the matricization permutation (if any)
-    /*
-      DPCT1003:289:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
     err = (*sycl_stream->memcpy(
                (char *)(const_args_dims.get_ptr()) +
                    sizeof(int) *
@@ -12835,46 +10739,7 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
            0); // tensor
     // dimension
     // extents
-    /*
-      DPCT1000:288:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
     if (err != 0) {
-      /*
-        DPCT1001:287:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:290:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
       if (VERBOSE)
         printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                "dlf): Left tensor dims H2D copy failed: %s\n",
@@ -12891,50 +10756,7 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
 				     (sycl_task->tens_args[1].const_mem_entry))),
 			   (void *)(sycl_task->tens_args[1].prmn_p),
 			   sizeof(int) * ((size_t)lrank)); // tensor matricization permutation
-      /*
-        DPCT1000:292:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
       if (err != 0) {
-        /*
-          DPCT1001:291:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:294:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
         if (VERBOSE)
           printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                  "dlf): Left tensor prmn H2D copy failed: %s\n",
@@ -12946,64 +10768,10 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)lrank);
     }
     if (gpu_l != gpu_num) { // data is not on the computing GPU
-      /*
-        DPCT1003:297:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
       err = (*sycl_stream->memcpy(ltens->dst_rsc->gmem_p,
                                   ltens->src_rsc->gmem_p, lsize),
              0);
-      /*
-        DPCT1000:296:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
       if (err != 0) {
-        /*
-          DPCT1001:295:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:298:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
         if (VERBOSE)
           printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                  "dlf): Left tensor body copy failed: %s\n",
@@ -13023,17 +10791,6 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
   if (sycl_task->tens_args[2].const_mem_entry >=
       0) { // GPU constant memory entry will contain tensor dimension extents
            // and the matricization permutation (if any)
-    /*
-      DPCT1003:301:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
     err = (*sycl_stream->memcpy(
                (char *)(const_args_dims.get_ptr()) +
                    sizeof(int) *
@@ -13043,46 +10800,7 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
            0); // tensor
     // dimension
     // extents
-    /*
-      DPCT1000:300:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
     if (err != 0) {
-      /*
-        DPCT1001:299:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:302:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
       if (VERBOSE)
         printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                "dlf): Right tensor dims H2D copy failed: %s\n",
@@ -13093,17 +10811,6 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     }
     gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)rrank);
     if (perm_r == YEP) {
-      /*
-        DPCT1003:305:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
       err = (*sycl_stream->memcpy(
                  (char *)(const_args_prmn.get_ptr()) +
                      sizeof(int) *
@@ -13112,50 +10819,7 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
                  (void *)(sycl_task->tens_args[2].prmn_p),
                  sizeof(int) * ((size_t)rrank)),
              0); // tensor matricization permutation
-      /*
-        DPCT1000:304:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
       if (err != 0) {
-        /*
-          DPCT1001:303:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:306:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
         if (VERBOSE)
           printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                  "dlf): Right tensor prmn H2D copy failed: %s\n",
@@ -13167,64 +10831,10 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)rrank);
     }
     if (gpu_r != gpu_num) { // data is not on the computing GPU
-      /*
-        DPCT1003:309:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
       err = (*sycl_stream->memcpy(rtens->dst_rsc->gmem_p,
                                   rtens->src_rsc->gmem_p, rsize),
              0);
-      /*
-        DPCT1000:308:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
       if (err != 0) {
-        /*
-          DPCT1001:307:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:310:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
         if (VERBOSE)
           printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                  "dlf): Right tensor body copy failed: %s\n",
@@ -13244,17 +10854,6 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
   if (sycl_task->tens_args[0].const_mem_entry >=
       0) { // GPU constant memory entry will contain tensor dimension extents
            // and the matricization permutation (if any)
-    /*
-      DPCT1003:313:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
     err = (*sycl_stream->memcpy(
                (char *)(const_args_dims.get_ptr()) +
                    sizeof(int) *
@@ -13264,46 +10863,7 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
            0); // tensor
     // dimension
     // extents
-    /*
-      DPCT1000:312:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
     if (err != 0) {
-      /*
-        DPCT1001:311:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:314:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
       if (VERBOSE)
         printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                "dlf): Destination tensor dims H2D copy failed: %s\n",
@@ -13314,17 +10874,6 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     }
     gpu_stats[gpu_num].traffic_in += sizeof(int) * ((size_t)drank);
     if (perm_d == YEP) {
-      /*
-        DPCT1003:317:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
       err = (*sycl_stream->memcpy(
                  (char *)(const_args_prmn.get_ptr()) +
                      sizeof(int) *
@@ -13333,50 +10882,7 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
                  (void *)(sycl_task->tens_args[0].prmn_p),
                  sizeof(int) * ((size_t)drank)),
              0); // tensor matricization permutation
-      /*
-        DPCT1000:316:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
       if (err != 0) {
-        /*
-          DPCT1001:315:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:318:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
         if (VERBOSE)
           printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                  "dlf): Destination tensor prmn H2D copy failed: %s\n",
@@ -13389,64 +10895,10 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     }
     if (gpu_d != gpu_num &&
         accumulative != NOPE) { // data is not on the computing GPU
-      /*
-        DPCT1003:321:
-        Migrated API
-        does not
-        return error
-        code. (*, 0)
-        is inserted.
-        You may need
-        to rewrite
-        this code.
-      */
       err = (*sycl_stream->memcpy(dtens->dst_rsc->gmem_p,
                                   dtens->src_rsc->gmem_p, dsize),
              0);
-      /*
-        DPCT1000:320:
-        Error
-        handling
-        if-stmt was
-        detected but
-        could not be
-        rewritten.
-      */
       if (err != 0) {
-        /*
-          DPCT1001:319:
-          The
-          statement
-          could not be
-          removed.
-        */
-        /*
-          DPCT1009:322:
-          SYCL uses
-          exceptions
-          to report
-          errors and
-          does not use
-          the error
-          codes. The
-          original
-          code was
-          commented
-          out and a
-          warning
-          string was
-          inserted.
-          You need to
-          rewrite this
-          code.
-        */
-        err_msg = "cudaGe"
-                  "tError"
-                  "String"
-                  " not "
-                  "suppor"
-                  "ted" /*cudaGetErrorString(err)*/
-            ;
         if (VERBOSE)
           printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                  "dlf): Destination tensor body copy failed: %s\n",
@@ -13464,81 +10916,9 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
   }
   // Schedule tensor transposes if needed:
   // Record a SYCL queue:
-  /*
-    DPCT1012:323:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:324:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  sycl_comput_ct1 = std::chrono::high_resolution_clock::now();
+  sycl_comput_ct = std::chrono::high_resolution_clock::now();
   err = 0;
-  /*
-    DPCT1000:268:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
   if (err != 0) {
-    /*
-      DPCT1001:267:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:325:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
     if (VERBOSE)
       printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_dlf):"
              " Unable to record the compute event: %s\n",
@@ -13556,56 +10936,68 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
           bx = MAX_SYCL_BLOCKS;
         switch (dtens->data_kind) {
         case R4:
-          (*sycl_stream)->submit([&](sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-            cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-            cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+            local_accessor<T, 1> buf0_acc(
+                cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+            local_accessor<float, 0> val_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> ftb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<size_t, 1> gtb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> htb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> stb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> dim_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> dim_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> o2n_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> pri_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> tmp0_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 0> err_code_acc(cgh);
+            local_accessor<int, 0> minor_acc(cgh);
+            local_accessor<int, 0> minor_in_acc(cgh);
+            local_accessor<int, 0> minor_out_acc(cgh);
+            local_accessor<int, 0> s1_ind_acc(cgh);
+            local_accessor<int, 0> s1_ond_acc(cgh);
+            local_accessor<int, 0> s1_step_acc(cgh);
+            local_accessor<int, 0> s1_dim_acc(cgh);
+            local_accessor<int, 0> s2_ind_acc(cgh);
+            local_accessor<int, 0> s2_ond_acc(cgh);
+            local_accessor<int, 0> s2_step_acc(cgh);
+            local_accessor<int, 0> s2_dim_acc(cgh);
+            local_accessor<int, 0> ns1_acc(cgh);
+            local_accessor<int, 0> ns2_acc(cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
             auto dtens_dst_rsc_gmem_p_ct4 = (float *)(dtens->dst_rsc->gmem_p);
             auto dtens_tmp_rsc_gmem_p_ct5 = (float *)(dtens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                sycl::nd_range(sycl::range(1, 1, bx) *
-                                   sycl::range(1, 1, THRDS_TENSOR_COPY),
-                               sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                [=](sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                      THRDS_TENSOR_COPY),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_dlf__(
                       0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                       val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                       gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -13625,56 +11017,68 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
           });
           break;
         case R8:
-          (*sycl_stream)->submit([&](sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-            cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-            cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+            local_accessor<T, 1> buf0_acc(
+                cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+            local_accessor<float, 0> val_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> ftb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<size_t, 1> gtb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> htb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> stb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> dim_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> dim_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> o2n_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> pri_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> tmp0_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 0> err_code_acc(cgh);
+            local_accessor<int, 0> minor_acc(cgh);
+            local_accessor<int, 0> minor_in_acc(cgh);
+            local_accessor<int, 0> minor_out_acc(cgh);
+            local_accessor<int, 0> s1_ind_acc(cgh);
+            local_accessor<int, 0> s1_ond_acc(cgh);
+            local_accessor<int, 0> s1_step_acc(cgh);
+            local_accessor<int, 0> s1_dim_acc(cgh);
+            local_accessor<int, 0> s2_ind_acc(cgh);
+            local_accessor<int, 0> s2_ond_acc(cgh);
+            local_accessor<int, 0> s2_step_acc(cgh);
+            local_accessor<int, 0> s2_dim_acc(cgh);
+            local_accessor<int, 0> ns1_acc(cgh);
+            local_accessor<int, 0> ns2_acc(cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
             auto dtens_dst_rsc_gmem_p_ct4 = (double *)(dtens->dst_rsc->gmem_p);
             auto dtens_tmp_rsc_gmem_p_ct5 = (double *)(dtens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                       cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                   cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                      THRDS_TENSOR_COPY),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_dlf__(
                       0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                       val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                       gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -13695,59 +11099,69 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
           break;
         case C4:
           if (fast_math == YEP) {
-            (*sycl_stream)->submit([&](sycl::handler &cgh) {
-              auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+            (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+              auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-              cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-              cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-              cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-              cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-              cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-              cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+              local_accessor<T, 1> buf0_acc(
+                  cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+              local_accessor<float, 0> val_acc(cgh);
+              local_accessor<size_t, 1> base_in_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<size_t, 1> base_out_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<size_t, 1> ftb_acc(
+                  cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+              local_accessor<size_t, 1> gtb_acc(
+                  cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+              local_accessor<int, 1> htb_acc(
+                  cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+              local_accessor<int, 1> stb_acc(
+                  cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+              local_accessor<int, 1> dim_in_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> dim_out_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> o2n_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> n2o_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> pri_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> tmp0_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 0> err_code_acc(cgh);
+              local_accessor<int, 0> minor_acc(cgh);
+              local_accessor<int, 0> minor_in_acc(cgh);
+              local_accessor<int, 0> minor_out_acc(cgh);
+              local_accessor<int, 0> s1_ind_acc(cgh);
+              local_accessor<int, 0> s1_ond_acc(cgh);
+              local_accessor<int, 0> s1_step_acc(cgh);
+              local_accessor<int, 0> s1_dim_acc(cgh);
+              local_accessor<int, 0> s2_ind_acc(cgh);
+              local_accessor<int, 0> s2_ond_acc(cgh);
+              local_accessor<int, 0> s2_step_acc(cgh);
+              local_accessor<int, 0> s2_dim_acc(cgh);
+              local_accessor<int, 0> ns1_acc(cgh);
+              local_accessor<int, 0> ns2_acc(cgh);
+              local_accessor<size_t, 0> vol_acc(cgh);
+              local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-              auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-              auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+              auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+              auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
               auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
               auto dtens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
               auto dtens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
 
               cgh.parallel_for(
-                  cl::sycl::nd_range(
-                      cl::sycl::range(1, 1, bx) *
-                          cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                  [=](cl::sycl::nd_item<3> item_ct) {
+                  cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                        THRDS_TENSOR_COPY),
+                  [=](cl::sycl::nd_item<1> item) {
                     gpu_tensor_block_copy_cmplx_split_out_dlf__(
                         0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
                         dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5,
-                        item_ct, const_args_dims_acc_ct1,
-                        const_args_prmn_acc_ct1, gpu_error_count_ptr_ct1,
-                        buf0_acc_ct.get_pointer(), val_acc_ct.get_pointer(),
-                        base_in_acc_ct.get_pointer(),
+                        item, const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                        gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                        val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                         base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                         gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
                         stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
@@ -13760,8 +11174,7 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
                         minor_out_acc_ct.get_pointer(),
                         s1_ind_acc_ct.get_pointer(),
                         s1_ond_acc_ct.get_pointer(),
-                        s1_step_acc_ct1get_pointer(),
-                        s1_dim_acc_ct1get_pointer(),
+                        s1_step_acc_ctget_pointer(), s1_dim_acc_ctget_pointer(),
                         s2_ind_acc_ct.get_pointer(),
                         s2_ond_acc_ct.get_pointer(),
                         s2_step_acc_ct.get_pointer(),
@@ -13772,58 +11185,68 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
             });
           } else {
             (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-              auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+              auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-              cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-              cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-              cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-              cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-              cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-              cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-              cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+              local_accessor<T, 1> buf0_acc(
+                  cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+              local_accessor<float, 0> val_acc(cgh);
+              local_accessor<size_t, 1> base_in_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<size_t, 1> base_out_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<size_t, 1> ftb_acc(
+                  cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+              local_accessor<size_t, 1> gtb_acc(
+                  cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+              local_accessor<int, 1> htb_acc(
+                  cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+              local_accessor<int, 1> stb_acc(
+                  cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+              local_accessor<int, 1> dim_in_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> dim_out_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> o2n_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> n2o_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> pri_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 1> tmp0_acc(
+                  cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+              local_accessor<int, 0> err_code_acc(cgh);
+              local_accessor<int, 0> minor_acc(cgh);
+              local_accessor<int, 0> minor_in_acc(cgh);
+              local_accessor<int, 0> minor_out_acc(cgh);
+              local_accessor<int, 0> s1_ind_acc(cgh);
+              local_accessor<int, 0> s1_ond_acc(cgh);
+              local_accessor<int, 0> s1_step_acc(cgh);
+              local_accessor<int, 0> s1_dim_acc(cgh);
+              local_accessor<int, 0> s2_ind_acc(cgh);
+              local_accessor<int, 0> s2_ond_acc(cgh);
+              local_accessor<int, 0> s2_step_acc(cgh);
+              local_accessor<int, 0> s2_dim_acc(cgh);
+              local_accessor<int, 0> ns1_acc(cgh);
+              local_accessor<int, 0> ns2_acc(cgh);
+              local_accessor<size_t, 0> vol_acc(cgh);
+              local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-              auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-              auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+              auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+              auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
               auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
               auto dtens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
               auto dtens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
 
               cgh.parallel_for(
-                  cl::sycl::nd_range(
-                      cl::sycl::range(1, 1, bx) *
-                          cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                  [=](cl::sycl::nd_item<3> item_ct) {
+                  cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                        THRDS_TENSOR_COPY),
+                  [=](cl::sycl::nd_item<1> item) {
                     gpu_tensor_block_copy_dlf__(
                         0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
                         dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5,
-                        item_ct, const_args_dims_acc_ct1,
-                        const_args_prmn_acc_ct1, gpu_error_count_ptr_ct1,
-                        buf0_acc_ct.get_pointer(), val_acc_ct.get_pointer(),
-                        base_in_acc_ct.get_pointer(),
+                        item, const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                        gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                        val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                         base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                         gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
                         stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
@@ -13850,55 +11273,67 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
           break;
         case C8:
           (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-            cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-            cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+            local_accessor<T, 1> buf0_acc(
+                cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+            local_accessor<float, 0> val_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> ftb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<size_t, 1> gtb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> htb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> stb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> dim_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> dim_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> o2n_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> pri_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> tmp0_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 0> err_code_acc(cgh);
+            local_accessor<int, 0> minor_acc(cgh);
+            local_accessor<int, 0> minor_in_acc(cgh);
+            local_accessor<int, 0> minor_out_acc(cgh);
+            local_accessor<int, 0> s1_ind_acc(cgh);
+            local_accessor<int, 0> s1_ond_acc(cgh);
+            local_accessor<int, 0> s1_step_acc(cgh);
+            local_accessor<int, 0> s1_dim_acc(cgh);
+            local_accessor<int, 0> s2_ind_acc(cgh);
+            local_accessor<int, 0> s2_ond_acc(cgh);
+            local_accessor<int, 0> s2_step_acc(cgh);
+            local_accessor<int, 0> s2_dim_acc(cgh);
+            local_accessor<int, 0> ns1_acc(cgh);
+            local_accessor<int, 0> ns2_acc(cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
             auto dtens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(dtens->dst_rsc->gmem_p);
             auto dtens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(dtens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                       cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                   cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                      THRDS_TENSOR_COPY),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_dlf__(
                       0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                       val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                       gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -13933,30 +11368,31 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         switch (dtens->data_kind) {
         case R4:
           (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
             auto dtens_dst_rsc_gmem_p_ct4 = (float *)(dtens->dst_rsc->gmem_p);
             auto dtens_tmp_rsc_gmem_p_ct5 = (float *)(dtens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(
-                    cl::sycl::range(1, 1, bx) *
-                        cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                    cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                      THRDS_TENSOR_COPY_SCAT),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_scatter_dlf__(
                       0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
+                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
                       vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer());
                 });
@@ -13964,29 +11400,30 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
           break;
         case R8:
           (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
             auto dtens_dst_rsc_gmem_p_ct4 = (double *)(dtens->dst_rsc->gmem_p);
             auto dtens_tmp_rsc_gmem_p_ct5 = (double *)(dtens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(
-                    cl::sycl::range(1, 1, bx) *
-                        cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                    cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                      THRDS_TENSOR_COPY_SCAT),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_scatter_dlf__(
                       0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
+                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
                       vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer());
                 });
@@ -13994,29 +11431,30 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
           break;
         case C4:
           (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
             auto dtens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
             auto dtens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(
-                    cl::sycl::range(1, 1, bx) *
-                        cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                    cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                      THRDS_TENSOR_COPY_SCAT),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_scatter_dlf__(
                       0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
+                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
                       vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer());
                 });
@@ -14024,30 +11462,31 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
           break;
         case C8:
           (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
             auto dtens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(dtens->dst_rsc->gmem_p);
             auto dtens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(dtens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(
-                    cl::sycl::range(1, 1, bx) *
-                        cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                    cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                      THRDS_TENSOR_COPY_SCAT),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_scatter_dlf__(
                       0, 1, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
+                      dtens_dst_rsc_gmem_p_ct4, dtens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
                       vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer());
                 });
@@ -14082,54 +11521,65 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       switch (ltens->data_kind) {
       case R4:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
-          cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (float *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (float *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                     cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                 cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                     val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                     gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -14150,55 +11600,66 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         break;
       case R8:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (double *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (double *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                     cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                 cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                     val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                     gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -14220,55 +11681,67 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       case C4:
         if (fast_math == YEP) {
           (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-            cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-            cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+            local_accessor<T, 1> buf0_acc(
+                cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+            local_accessor<float, 0> val_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> ftb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<size_t, 1> gtb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> htb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> stb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> dim_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> dim_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> o2n_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> pri_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> tmp0_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 0> err_code_acc(cgh);
+            local_accessor<int, 0> minor_acc(cgh);
+            local_accessor<int, 0> minor_in_acc(cgh);
+            local_accessor<int, 0> minor_out_acc(cgh);
+            local_accessor<int, 0> s1_ind_acc(cgh);
+            local_accessor<int, 0> s1_ond_acc(cgh);
+            local_accessor<int, 0> s1_step_acc(cgh);
+            local_accessor<int, 0> s1_dim_acc(cgh);
+            local_accessor<int, 0> s2_ind_acc(cgh);
+            local_accessor<int, 0> s2_ond_acc(cgh);
+            local_accessor<int, 0> s2_step_acc(cgh);
+            local_accessor<int, 0> s2_dim_acc(cgh);
+            local_accessor<int, 0> ns1_acc(cgh);
+            local_accessor<int, 0> ns2_acc(cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
             auto ltens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(ltens->dst_rsc->gmem_p);
             auto ltens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(ltens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                       cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                   cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                      THRDS_TENSOR_COPY),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_cmplx_split_out_dlf__(
                       0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                      ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                      ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                       val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                       gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -14288,59 +11761,71 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
           });
         } else {
           (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-            cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-            cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+            local_accessor<T, 1> buf0_acc(
+                cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+            local_accessor<float, 0> val_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> ftb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<size_t, 1> gtb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> htb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> stb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> dim_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> dim_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> o2n_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> pri_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> tmp0_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 0> err_code_acc(cgh);
+            local_accessor<int, 0> minor_acc(cgh);
+            local_accessor<int, 0> minor_in_acc(cgh);
+            local_accessor<int, 0> minor_out_acc(cgh);
+            local_accessor<int, 0> s1_ind_acc(cgh);
+            local_accessor<int, 0> s1_ond_acc(cgh);
+            local_accessor<int, 0> s1_step_acc(cgh);
+            local_accessor<int, 0> s1_dim_acc(cgh);
+            local_accessor<int, 0> s2_ind_acc(cgh);
+            local_accessor<int, 0> s2_ond_acc(cgh);
+            local_accessor<int, 0> s2_step_acc(cgh);
+            local_accessor<int, 0> s2_dim_acc(cgh);
+            local_accessor<int, 0> ns1_acc(cgh);
+            local_accessor<int, 0> ns2_acc(cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
             auto ltens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(ltens->dst_rsc->gmem_p);
             auto ltens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(ltens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                       cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                   cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                      THRDS_TENSOR_COPY),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_dlf__(
                       0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                      ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                      ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                       val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                       gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
-                      stb_acc_ct.get_pointer(), dim_in_acc_ct1get_pointer(),
+                      stb_acc_ct.get_pointer(), dim_in_acc_ctget_pointer(),
                       dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
                       n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
                       tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
@@ -14358,55 +11843,66 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         break;
       case C8:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
           auto ltens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(ltens->dst_rsc->gmem_p);
           auto ltens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                     cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                 cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                     val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                     gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -14441,125 +11937,137 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       switch (ltens->data_kind) {
       case R4:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-          auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
-          auto ltens_dst_rsc_gmem_p_ct4 = (float *)(ltens->dst_rsc->gmem_p);
-          auto ltens_tmp_rsc_gmem_p_ct5 = (float *)(ltens->tmp_rsc->gmem_p);
+          auto const_args_dims_acc = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+          auto sycl_task_tens_args_const_mem_entry3 =
+              sycl_task->tens_args[1].const_mem_entry;
+          auto ltens_dst_rsc_gmem_p4 = (float *)(ltens->dst_rsc->gmem_p);
+          auto ltens_tmp_rsc_gmem_p5 = (float *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(
-                  cl::sycl::range(1, 1, bx) *
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                  cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
-                    0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
-                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
-                    base_out_acc_ct.get_pointer());
+                    0, 0, lrank, sycl_task_tens_args_const_mem_entry3,
+                    ltens_dst_rsc_gmem_p4, ltens_tmp_rsc_gmem_p5, item,
+                    const_args_dims_acc, const_args_prmn_acc,
+                    gpu_error_count_ptr, n2o_acc.get_pointer(),
+                    vol_acc.get_pointer(), base_in_acc.get_pointer(),
+                    base_out_acc.get_pointer());
               });
         });
         break;
       case R8:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-          auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
-          auto ltens_dst_rsc_gmem_p_ct4 = (double *)(ltens->dst_rsc->gmem_p);
-          auto ltens_tmp_rsc_gmem_p_ct5 = (double *)(ltens->tmp_rsc->gmem_p);
+          auto const_args_dims_acc = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+          auto sycl_task_tens_args_const_mem_entry3 =
+              sycl_task->tens_args[1].const_mem_entry;
+          auto ltens_dst_rsc_gmem_p4 = (double *)(ltens->dst_rsc->gmem_p);
+          auto ltens_tmp_rsc_gmem_p5 = (double *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(
-                  cl::sycl::range(1, 1, bx) *
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                  cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
-                    0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
-                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
-                    base_out_acc_ct.get_pointer());
+                    0, 0, lrank, sycl_task_tens_args_const_mem_entry3,
+                    ltens_dst_rsc_gmem_p4, ltens_tmp_rsc_gmem_p5, item,
+                    const_args_dims_acc, const_args_prmn_acc,
+                    gpu_error_count_ptr, n2o_acc.get_pointer(),
+                    vol_acc.get_pointer(), base_in_acc.get_pointer(),
+                    base_out_acc.get_pointer());
               });
         });
         break;
       case C4:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-          auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
-          auto ltens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(ltens->dst_rsc->gmem_p);
-          auto ltens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(ltens->tmp_rsc->gmem_p);
+          auto const_args_dims_acc = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+          auto sycl_task_tens_args_const_mem_entry3 =
+              sycl_task->tens_args[1].const_mem_entry;
+          auto ltens_dst_rsc_gmem_p4 =
+              (talshComplex4 *)(ltens->dst_rsc->gmem_p);
+          auto ltens_tmp_rsc_gmem_p5 =
+              (talshComplex4 *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(
-                  cl::sycl::range(1, 1, bx) *
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                  cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
-                    0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
-                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
-                    base_out_acc_ct.get_pointer());
+                    0, 0, lrank, sycl_task_tens_args_const_mem_entry3,
+                    ltens_dst_rsc_gmem_p4, ltens_tmp_rsc_gmem_p5, item,
+                    const_args_dims_acc, const_args_prmn_acc,
+                    gpu_error_count_ptr, n2o_acc.get_pointer(),
+                    vol_acc.get_pointer(), base_in_acc.get_pointer(),
+                    base_out_acc.get_pointer());
               });
         });
         break;
       case C8:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
-          auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[1].const_mem_entry;
-          auto ltens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(ltens->dst_rsc->gmem_p);
-          auto ltens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(ltens->tmp_rsc->gmem_p);
+          auto const_args_dims_acc = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
+          auto sycl_task_tens_args_const_mem_entry3 =
+              sycl_task->tens_args[1].const_mem_entry;
+          auto ltens_dst_rsc_gmem_p4 =
+              (talshComplex8 *)(ltens->dst_rsc->gmem_p);
+          auto ltens_tmp_rsc_gmem_p5 =
+              (talshComplex8 *)(ltens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(
-                  cl::sycl::range(1, 1, bx) *
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                  cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
-                    0, 0, lrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    ltens_dst_rsc_gmem_p_ct4, ltens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
-                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
-                    base_out_acc_ct.get_pointer());
+                    0, 0, lrank, sycl_task_tens_args_const_mem_entry3,
+                    ltens_dst_rsc_gmem_p4, ltens_tmp_rsc_gmem_p5, item,
+                    const_args_dims_acc, const_args_prmn_acc,
+                    gpu_error_count_ptr, n2o_acc.get_pointer(),
+                    vol_acc.get_pointer(), base_in_acc.get_pointer(),
+                    base_out_acc.get_pointer());
               });
         });
         break;
@@ -14586,55 +12094,66 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       switch (rtens->data_kind) {
       case R4:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[2].const_mem_entry;
           auto rtens_dst_rsc_gmem_p_ct4 = (float *)(rtens->dst_rsc->gmem_p);
           auto rtens_tmp_rsc_gmem_p_ct5 = (float *)(rtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                     cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                 cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, rrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                     val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                     gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -14655,55 +12174,66 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         break;
       case R8:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[2].const_mem_entry;
           auto rtens_dst_rsc_gmem_p_ct4 = (double *)(rtens->dst_rsc->gmem_p);
           auto rtens_tmp_rsc_gmem_p_ct5 = (double *)(rtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                     cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                 cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, rrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                     val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                     gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -14725,55 +12255,67 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       case C4:
         if (fast_math == YEP) {
           (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-            cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-            cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+            local_accessor<T, 1> buf0_acc(
+                cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+            local_accessor<float, 0> val_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> ftb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<size_t, 1> gtb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> htb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> stb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> dim_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> dim_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> o2n_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> pri_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> tmp0_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 0> err_code_acc(cgh);
+            local_accessor<int, 0> minor_acc(cgh);
+            local_accessor<int, 0> minor_in_acc(cgh);
+            local_accessor<int, 0> minor_out_acc(cgh);
+            local_accessor<int, 0> s1_ind_acc(cgh);
+            local_accessor<int, 0> s1_ond_acc(cgh);
+            local_accessor<int, 0> s1_step_acc(cgh);
+            local_accessor<int, 0> s1_dim_acc(cgh);
+            local_accessor<int, 0> s2_ind_acc(cgh);
+            local_accessor<int, 0> s2_ond_acc(cgh);
+            local_accessor<int, 0> s2_step_acc(cgh);
+            local_accessor<int, 0> s2_dim_acc(cgh);
+            local_accessor<int, 0> ns1_acc(cgh);
+            local_accessor<int, 0> ns2_acc(cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[2].const_mem_entry;
             auto rtens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(rtens->dst_rsc->gmem_p);
             auto rtens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(rtens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                       cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                   cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range(cl::sycl::range(bx * THRDS_TENSOR_COPY),
+                                   cl::sycl::range(THRDS_TENSOR_COPY)),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_cmplx_split_out_dlf__(
                       0, 0, rrank, sycl_task_tens_args_const_mem_entry_ct3,
-                      rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                      rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                       val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                       gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -14793,55 +12335,67 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
           });
         } else {
           (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+            auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-            cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-	    cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-            cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-            cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+            local_accessor<T, 1> buf0_acc(
+                cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+            local_accessor<float, 0> val_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> ftb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<size_t, 1> gtb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> htb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> stb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> dim_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> dim_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> o2n_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> pri_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> tmp0_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 0> err_code_acc(cgh);
+            local_accessor<int, 0> minor_acc(cgh);
+            local_accessor<int, 0> minor_in_acc(cgh);
+            local_accessor<int, 0> minor_out_acc(cgh);
+            local_accessor<int, 0> s1_ind_acc(cgh);
+            local_accessor<int, 0> s1_ond_acc(cgh);
+            local_accessor<int, 0> s1_step_acc(cgh);
+            local_accessor<int, 0> s1_dim_acc(cgh);
+            local_accessor<int, 0> s2_ind_acc(cgh);
+            local_accessor<int, 0> s2_ond_acc(cgh);
+            local_accessor<int, 0> s2_step_acc(cgh);
+            local_accessor<int, 0> s2_dim_acc(cgh);
+            local_accessor<int, 0> ns1_acc(cgh);
+            local_accessor<int, 0> ns2_acc(cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
             auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[2].const_mem_entry;
             auto rtens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(rtens->dst_rsc->gmem_p);
             auto rtens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(rtens->tmp_rsc->gmem_p);
 
             cgh.parallel_for(
-                cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                       cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                   cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                [=](cl::sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                      THRDS_TENSOR_COPY),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_dlf__(
                       0, 0, rrank, sycl_task_tens_args_const_mem_entry_ct3,
-                      rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                      rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item,
+                      const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                      gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                       val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                       base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                       gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -14863,55 +12417,66 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         break;
       case C8:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> buf0_acc_ct(cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          cl::sycl::accessor<float, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> val_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ftb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> gtb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> htb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> stb_acc_ct(cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> dim_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> o2n_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> pri_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> tmp0_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> err_code_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_in_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> minor_out_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s1_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ind_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_ond_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_step_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> s2_dim_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns1_acc_ct(cgh);
-          cl::sycl::accessor<int, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> ns2_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_ext_acc_ct(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[2].const_mem_entry;
           auto rtens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(rtens->dst_rsc->gmem_p);
           auto rtens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(rtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
-                                     cl::sycl::range(1, 1, THRDS_TENSOR_COPY),
-                                 cl::sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     0, 0, rrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct.get_pointer(),
+                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
                     val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
                     gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
@@ -14946,30 +12511,31 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       switch (rtens->data_kind) {
       case R4:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[2].const_mem_entry;
           auto rtens_dst_rsc_gmem_p_ct4 = (float *)(rtens->dst_rsc->gmem_p);
           auto rtens_tmp_rsc_gmem_p_ct5 = (float *)(rtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(
-                  cl::sycl::range(1, 1, bx) *
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                  cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range(cl::sycl::range(bx * THRDS_TENSOR_COPY_SCAT),
+                                 cl::sycl::range(THRDS_TENSOR_COPY_SCAT)),
+              [=](cl::sycl::nd_item<3> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 0, rrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
+                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
                     vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer());
               });
@@ -14977,30 +12543,31 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         break;
       case R8:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[2].const_mem_entry;
           auto rtens_dst_rsc_gmem_p_ct4 = (double *)(rtens->dst_rsc->gmem_p);
           auto rtens_tmp_rsc_gmem_p_ct5 = (double *)(rtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(
-                  cl::sycl::range(1, 1, bx) *
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                  cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range(cl::sycl::range(bx * THRDS_TENSOR_COPY_SCAT),
+                                 cl::sycl::range(THRDS_TENSOR_COPY_SCAT)),
+              [=](cl::sycl::nd_item<3> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 0, rrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
+                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
                     vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer());
               });
@@ -15008,30 +12575,31 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         break;
       case C4:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[2].const_mem_entry;
           auto rtens_dst_rsc_gmem_p_ct4 = (talshComplex4 *)(rtens->dst_rsc->gmem_p);
           auto rtens_tmp_rsc_gmem_p_ct5 = (talshComplex4 *)(rtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(
-                  cl::sycl::range(1, 1, bx) *
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                  cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range(cl::sycl::range(bx * THRDS_TENSOR_COPY_SCAT),
+                                 cl::sycl::range(THRDS_TENSOR_COPY_SCAT)),
+              [=](cl::sycl::nd_item<3> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 0, rrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
+                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
                     vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer());
               });
@@ -15039,30 +12607,31 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         break;
       case C8:
         (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          cl::sycl::accessor<int, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> n2o_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 0, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> vol_acc_ct(cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_in_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          cl::sycl::accessor<size_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> base_out_acc_ct(cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
 
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[2].const_mem_entry;
           auto rtens_dst_rsc_gmem_p_ct4 = (talshComplex8 *)(rtens->dst_rsc->gmem_p);
           auto rtens_tmp_rsc_gmem_p_ct5 = (talshComplex8 *)(rtens->tmp_rsc->gmem_p);
 
           cgh.parallel_for(
-              cl::sycl::nd_range(
-                  cl::sycl::range(1, 1, bx) *
-                      cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                  cl::sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](cl::sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range(cl::sycl::range(bx * THRDS_TENSOR_COPY_SCAT),
+                                 cl::sycl::range(THRDS_TENSOR_COPY_SCAT)),
+              [=](cl::sycl::nd_item<3> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     0, 0, rrank, sycl_task_tens_args_const_mem_entry_ct3,
-                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct.get_pointer(),
+                    rtens_dst_rsc_gmem_p_ct4, rtens_tmp_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
                     vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
                     base_out_acc_ct.get_pointer());
               });
@@ -15250,9 +12819,9 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
         cgh.parallel_for(
             cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
-            [=](cl::sycl::nd_item<1> item_ct) {
+            [=](cl::sycl::nd_item<1> item) {
               gpu_array_add__(vol_d, (float *)(darg), (float *)(rarg),
-                              (float *)(larg), (float)scale_real, item_ct, 0);
+                              (float *)(larg), (float)scale_real, item, 0);
             });
       });
       break;
@@ -15260,9 +12829,9 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
         cgh.parallel_for(
             cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
-            [=](cl::sycl::nd_item<1> item_ct) {
+            [=](cl::sycl::nd_item<1> item) {
               gpu_array_add__(vol_d, (double *)(darg), (double *)(rarg),
-                              (double *)(larg), (double)scale_real, item_ct, 0);
+                              (double *)(larg), (double)scale_real, item, 0);
             });
       });
       break;
@@ -15271,10 +12840,10 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
         cgh.parallel_for(
             cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
-            [=](cl::sycl::nd_item<1> item_ct) {
+            [=](cl::sycl::nd_item<1> item) {
               gpu_array_add__(vol_d, (talshComplex4 *)(darg),
                               (talshComplex4 *)(rarg), (talshComplex4 *)(larg),
-                              (talshComplex4)scale_cmplx4, item_ct, conj_r);
+                              (talshComplex4)scale_cmplx4, item, conj_r);
             });
       });
       break;
@@ -15283,10 +12852,10 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
         cgh.parallel_for(
             cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
-            [=](cl::sycl::nd_item<1> item_ct) {
+            [=](cl::sycl::nd_item<1> item) {
               gpu_array_add__(vol_d, (talshComplex8 *)(darg),
                               (talshComplex8 *)(rarg), (talshComplex8 *)(larg),
-                              (talshComplex8)scale_cmplx8, item_ct, conj_r);
+                              (talshComplex8)scale_cmplx8, item, conj_r);
             });
       });
       break;
@@ -15305,9 +12874,9 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
         cgh.parallel_for(
             cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
-            [=](cl::sycl::nd_item<1> item_ct) {
+            [=](cl::sycl::nd_item<1> item) {
               gpu_array_add__(vol_d, (float *)(darg), (float *)(larg),
-                              (float *)(rarg), (float)scale_real, item_ct, 0);
+                              (float *)(rarg), (float)scale_real, item, 0);
             });
       });
       break;
@@ -15315,9 +12884,9 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
         cgh.parallel_for(
             cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
-            [=](cl::sycl::nd_item<1> item_ct) {
+            [=](cl::sycl::nd_item<1> item) {
               gpu_array_add__(vol_d, (double *)(darg), (double *)(larg),
-                              (double *)(rarg), (double)scale_real, item_ct, 0);
+                              (double *)(rarg), (double)scale_real, item, 0);
             });
       });
       break;
@@ -15326,10 +12895,10 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
         cgh.parallel_for(
             cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
-            [=](cl::sycl::nd_item<1> item_ct) {
+            [=](cl::sycl::nd_item<1> item) {
               gpu_array_add__(vol_d, (talshComplex4 *)(darg),
                               (talshComplex4 *)(larg), (talshComplex4 *)(rarg),
-                              (talshComplex4)scale_cmplx4, item_ct, conj_l);
+                              (talshComplex4)scale_cmplx4, item, conj_l);
             });
       });
       break;
@@ -15338,10 +12907,10 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
         cgh.parallel_for(
             cl::sycl::nd_range<1>(bx * THRDS_ARRAY_ADD, THRDS_ARRAY_ADD),
-            [=](cl::sycl::nd_item<1> item_ct) {
+            [=](cl::sycl::nd_item<1> item) {
               gpu_array_add__(vol_d, (talshComplex8 *)(darg),
                               (talshComplex8 *)(larg), (talshComplex8 *)(rarg),
-                              (talshComplex8)scale_cmplx8, item_ct, conj_l);
+                              (talshComplex8)scale_cmplx8, item, conj_l);
             });
       });
       break;
@@ -15358,56 +12927,59 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     switch (ltens->data_kind) {
     case R4:
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-        auto dot_product_wr_lock_ptr_ct1 = dot_product_wr_lock.get_ptr();
+        auto dot_product_wr_lock_ptr_ct = dot_product_wr_lock.get_ptr();
 
-        cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> local_acc(cl::sycl::range(THRDS_ARRAY_SCALE * sizeof(float)), cgh);
+        local_accessor<uint8_t, 1> local_acc(
+            cl::sycl::range(THRDS_ARRAY_SCALE * sizeof(float)), cgh);
 
         cgh.parallel_for(
             cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
                                    cl::sycl::range(1, 1, THRDS_ARRAY_SCALE),
                                cl::sycl::range(1, 1, THRDS_ARRAY_SCALE)),
-            [=](cl::sycl::nd_item<3> item_ct) {
+            [=](cl::sycl::nd_item<3> item) {
               gpu_array_dot_product__(vol_l, (float *)larg, (float *)rarg,
-                                      (float *)darg, (float)scale_real, item_ct,
+                                      (float *)darg, (float)scale_real, item,
                                       local_acc.get_pointer(),
-                                      dot_product_wr_lock_ptr_ct1, 0, 0);
+                                      dot_product_wr_lock_ptr_ct, 0, 0);
             });
       });
       break;
     case R8:
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-        auto dot_product_wr_lock_ptr_ct1 = dot_product_wr_lock.get_ptr();
+        auto dot_product_wr_lock_ptr_ct = dot_product_wr_lock.get_ptr();
 
-        cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> local_acc(cl::sycl::range(THRDS_ARRAY_SCALE * sizeof(double)), cgh);
+        local_accessor<uint8_t, 1> local_acc(
+            cl::sycl::range(THRDS_ARRAY_SCALE * sizeof(double)), cgh);
 
         cgh.parallel_for(
             cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
                                    cl::sycl::range(1, 1, THRDS_ARRAY_SCALE),
                                cl::sycl::range(1, 1, THRDS_ARRAY_SCALE)),
-            [=](cl::sycl::nd_item<3> item_ct) {
+            [=](cl::sycl::nd_item<3> item) {
               gpu_array_dot_product__(vol_l, (double *)larg, (double *)rarg,
-                                      (double *)darg, scale_real, item_ct,
+                                      (double *)darg, scale_real, item,
                                       local_acc.get_pointer(),
-                                      dot_product_wr_lock_ptr_ct1, 0, 0);
+                                      dot_product_wr_lock_ptr_ct, 0, 0);
             });
       });
       break;
     case C4:
       scale_cmplx4 = talshComplex4Set((float)scale_real, (float)scale_imag);
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-        auto dot_product_wr_lock_ptr_ct1 = dot_product_wr_lock.get_ptr();
+        auto dot_product_wr_lock_ptr_ct = dot_product_wr_lock.get_ptr();
 
-        cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> local_acc(cl::sycl::range(THRDS_ARRAY_SCALE * sizeof(talshComplex4)), cgh);
+        local_accessor<uint8_t, 1> local_acc(
+            cl::sycl::range(THRDS_ARRAY_SCALE * sizeof(talshComplex4)), cgh);
 
         cgh.parallel_for(
             cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
                                    cl::sycl::range(1, 1, THRDS_ARRAY_SCALE),
                                cl::sycl::range(1, 1, THRDS_ARRAY_SCALE)),
-            [=](cl::sycl::nd_item<3> item_ct) {
+            [=](cl::sycl::nd_item<3> item) {
               gpu_array_dot_product__(
                   vol_l, (talshComplex4 *)larg, (talshComplex4 *)rarg,
-                  (talshComplex4 *)darg, scale_cmplx4, item_ct,
-                  local_acc.get_pointer(), dot_product_wr_lock_ptr_ct1, conj_l,
+                  (talshComplex4 *)darg, scale_cmplx4, item,
+                  local_acc.get_pointer(), dot_product_wr_lock_ptr_ct, conj_l,
                   conj_r);
             });
       });
@@ -15415,19 +12987,20 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     case C8:
       scale_cmplx8 = talshComplex8Set(scale_real, scale_imag);
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-        auto dot_product_wr_lock_ptr_ct1 = dot_product_wr_lock.get_ptr();
+        auto dot_product_wr_lock_ptr_ct = dot_product_wr_lock.get_ptr();
 
-        cl::sycl::accessor<uint8_t, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> local_acc(cl::sycl::range(THRDS_ARRAY_SCALE * sizeof(talshComplex8)), cgh);
+        local_accessor<uint8_t, 1> local_acc(
+            cl::sycl::range(THRDS_ARRAY_SCALE * sizeof(talshComplex8)), cgh);
 
         cgh.parallel_for(
             cl::sycl::nd_range(cl::sycl::range(1, 1, bx) *
                                    cl::sycl::range(1, 1, THRDS_ARRAY_SCALE),
                                cl::sycl::range(1, 1, THRDS_ARRAY_SCALE)),
-            [=](cl::sycl::nd_item<3> item_ct) {
+            [=](cl::sycl::nd_item<3> item) {
               gpu_array_dot_product__(
                   vol_l, (talshComplex8 *)larg, (talshComplex8 *)rarg,
-                  (talshComplex8 *)darg, scale_cmplx8, item_ct,
-                  local_acc.get_pointer(), dot_product_wr_lock_ptr_ct1, conj_l,
+                  (talshComplex8 *)darg, scale_cmplx8, item,
+                  local_acc.get_pointer(), dot_product_wr_lock_ptr_ct, conj_l,
                   conj_r);
             });
       });
@@ -15441,28 +13014,34 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
   } else if (drank > 0 && drank == lrank + rrank) {
     bx = 1 + (vol_l - 1) / THRDS_ARRAY_PRODUCT;
     by = 1 + (vol_r - 1) / THRDS_ARRAY_PRODUCT;
-    limit_sycl_blocks2d(MAX_SYCL_BLOCKS, &bx, &by);
+    limit_sycl_workgroups2d(MAX_SYCL_BLOCKS, &bx, &by);
     sycl::range blcks(bx, by, 1);
 
     switch (dtens->data_kind) {
     case R4:
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-        cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
-        cl::sycl::accessor<talshComplex4, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<talshComplex4, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
-        cl::sycl::accessor<talshComplex8, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<talshComplex8, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
+        local_accessor<T, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<T, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
+        local_accessor<talshComplex4, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<talshComplex4, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
+        local_accessor<talshComplex8, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<talshComplex8, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
 
         cgh.parallel_for(
             cl::sycl::nd_range(
                 cl::sycl::range(blcks.get(2), blcks.get(1), blcks.get(0)) *
                     cl::sycl::range(1, 1, THRDS_ARRAY_PRODUCT),
                 cl::sycl::range(1, 1, THRDS_ARRAY_PRODUCT)),
-            [=](cl::sycl::nd_item<3> item_ct) {
+            [=](cl::sycl::nd_item<3> item) {
               gpu_array_product__(
                   vol_l, (float *)larg, vol_r, (float *)rarg, (float *)darg,
-                  (float)scale_real, item_ct, lbuf_acc_ct.get_pointer(),
+                  (float)scale_real, item, lbuf_acc_ct.get_pointer(),
                   rbuf_acc_ct.get_pointer(), lbuf_acc_ct.get_pointer(),
                   rbuf_acc_ct.get_pointer(), lbuf_acc_ct.get_pointer(),
                   rbuf_acc_ct.get_pointer(), 0, 0);
@@ -15471,22 +13050,28 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
       break;
     case R8:
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-        cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
-        cl::sycl::accessor<talshComplex4, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<talshComplex4, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
-        cl::sycl::accessor<talshComplex8, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<talshComplex8, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
+        local_accessor<T, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<T, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
+        local_accessor<talshComplex4, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<talshComplex4, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
+        local_accessor<talshComplex8, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<talshComplex8, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
 
         cgh.parallel_for(
             cl::sycl::nd_range(
                 cl::sycl::range(blcks.get(2), blcks.get(1), blcks.get(0)) *
                     cl::sycl::range(1, 1, THRDS_ARRAY_PRODUCT),
                 cl::sycl::range(1, 1, THRDS_ARRAY_PRODUCT)),
-            [=](cl::sycl::nd_item<3> item_ct) {
+            [=](cl::sycl::nd_item<3> item) {
               gpu_array_product__(
                   vol_l, (double *)larg, vol_r, (double *)rarg, (double *)darg,
-                  scale_real, item_ct, lbuf_acc_ct.get_pointer(),
+                  scale_real, item, lbuf_acc_ct.get_pointer(),
                   rbuf_acc_ct.get_pointer(), lbuf_acc_ct.get_pointer(),
                   rbuf_acc_ct.get_pointer(), lbuf_acc_ct.get_pointer(),
                   rbuf_acc_ct.get_pointer(), 0, 0);
@@ -15496,22 +13081,28 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     case C4:
       scale_cmplx4 = talshComplex4Set((float)scale_real, (float)scale_imag);
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-        cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
-        cl::sycl::accessor<talshComplex4, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<talshComplex4, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
-        cl::sycl::accessor<talshComplex8, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<talshComplex8, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
+        local_accessor<T, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<T, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT*/), cgh);
+        local_accessor<talshComplex4, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<talshComplex4, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
+        local_accessor<talshComplex8, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<talshComplex8, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
 
         cgh.parallel_for(
             cl::sycl::nd_range(
                 cl::sycl::range(blcks.get(2), blcks.get(1), blcks.get(0)) *
                     cl::sycl::range(1, 1, THRDS_ARRAY_PRODUCT),
                 cl::sycl::range(1, 1, THRDS_ARRAY_PRODUCT)),
-            [=](cl::sycl::nd_item<3> item_ct) {
+            [=](cl::sycl::nd_item<3> item) {
               gpu_array_product__(
                   vol_l, (talshComplex4 *)larg, vol_r, (talshComplex4 *)rarg,
-                  (talshComplex4 *)darg, scale_cmplx4, item_ct,
+                  (talshComplex4 *)darg, scale_cmplx4, item,
                   lbuf_acc_ct.get_pointer(), rbuf_acc_ct.get_pointer(),
                   lbuf_acc_ct.get_pointer(), rbuf_acc_ct.get_pointer(),
                   lbuf_acc_ct.get_pointer(), rbuf_acc_ct.get_pointer(), conj_l,
@@ -15522,22 +13113,28 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     case C8:
       scale_cmplx8 = talshComplex8Set(scale_real, scale_imag);
       (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
-        cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<T, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
-        cl::sycl::accessor<talshComplex4, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<talshComplex4, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
-        cl::sycl::accessor<talshComplex8, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> lbuf_acc_ct(cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
-        cl::sycl::accessor<talshComplex8, 1, cl::sycl::access::mode::read_write, cl::sycl::access::target::local> rbuf_acc_ct(cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
+        local_accessor<T, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<T, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
+        local_accessor<talshComplex4, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<talshComplex4, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
+        local_accessor<talshComplex8, 1> lbuf_acc(
+            cl::sycl::range(257 /*THRDS_ARRAY_PRODUCT+1*/), cgh);
+        local_accessor<talshComplex8, 1> rbuf_acc(
+            cl::sycl::range(256 /*THRDS_ARRAY_PRODUCT  */), cgh);
 
         cgh.parallel_for(
             cl::sycl::nd_range(
                 cl::sycl::range(blcks.get(2), blcks.get(1), blcks.get(0)) *
                     cl::sycl::range(1, 1, THRDS_ARRAY_PRODUCT),
                 cl::sycl::range(1, 1, THRDS_ARRAY_PRODUCT)),
-            [=](cl::sycl::nd_item<3> item_ct) {
+            [=](cl::sycl::nd_item<3> item) {
               gpu_array_product__(
                   vol_l, (talshComplex8 *)larg, vol_r, (talshComplex8 *)rarg,
-                  (talshComplex8 *)darg, scale_cmplx8, item_ct,
+                  (talshComplex8 *)darg, scale_cmplx8, item,
                   lbuf_acc_ct.get_pointer(), rbuf_acc_ct.get_pointer(),
                   lbuf_acc_ct.get_pointer(), rbuf_acc_ct.get_pointer(),
                   lbuf_acc_ct.get_pointer(), rbuf_acc_ct.get_pointer(), conj_l,
@@ -15714,63 +13311,50 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
 #endif       /*NO_BLAS*/
       bx = 1 + (vol_l - 1) / MAT_MULT_TILE_DIMX;
       by = 1 + (vol_r - 1) / MAT_MULT_TILE_DIMY;
-      limit_sycl_blocks2d(MAX_SYCL_BLOCKS, &bx, &by);
+      limit_sycl_workgroups2d(MAX_SYCL_BLOCKS, &bx, &by);
       // if(DEBUG)
       // printf("\n#DEBUG(tensor_algebra_gpu_intel:gpu_tensor_block_contract_dlf):
       // CUDA exec conf: %d %d %d
       // %d\n",bx,by,MAT_MULT_TILE_DIMX,MAT_MULT_TILE_DIMY); //debug
-      sycl::range blcks(bx, by, 1);
-      sycl::range thrds(MAT_MULT_TILE_DIMX, MAT_MULT_TILE_DIMY, 1);
+      cl::sycl::range<2> blcks(bx, by);
+      cl::sycl::range<2> thrds(MAT_MULT_TILE_DIMX, MAT_MULT_TILE_DIMY);
+      auto global_range = blcks * thrds;
+      cl::sycl::range<2> buf1_range(17 /*MAT_MULT_TILE_DIMX+1*/,
+                                    17 /*MAT_MULT_TILE_DIMX+1*/);
+      cl::sycl::range<2> buf2_range(17 /*MAT_MULT_TILE_DIMY+1*/,
+                                    17 /*MAT_MULT_TILE_DIMX+1*/);
+
       switch (dtens->data_kind) {
       case R4:
-        (*sycl_stream)->submit([&](sycl::handler &cgh) {
-          sycl::range buf1_range_ct(17 /*MAT_MULT_TILE_DIMX+1*/, 17 /*MAT_MULT_TILE_DIMX+1*/);
-          sycl::range buf2_range_ct(17 /*MAT_MULT_TILE_DIMY+1*/, 17 /*MAT_MULT_TILE_DIMX+1*/);
+        (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+          local_accessor<T, 2> buf1_acc(buf1_range, cgh);
+          local_accessor<T, 2> buf2_acc(buf2_range, cgh);
 
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 2, sycl::access::mode::read_write, sycl::access::target::local> buf1_acc_ct(buf1_range_ct1, cgh);
-          sycl::accessor<T, 2, sycl::access::mode::read_write, sycl::access::target::local> buf2_acc_ct(buf2_range_ct1, cgh);
-          auto global_range = blcks * thrds;
-
-          cgh.parallel_for(
-              sycl::nd_range(
-                  sycl::range(global_range.get(2),
-                              global_range.get(1),
-                              global_range.get(0)),
-                  sycl::range(thrds.get(2), thrds.get(1), thrds.get(0))),
-              [=](sycl::nd_item<3> item_ct) {
-                gpu_matrix_multiply_tn__(
-                    ll, lr, lc, (float *)larg, (float *)rarg, (float *)darg,
-                    (float)scale_real, item_ct, gpu_error_count_ptr_ct1,
-                    dpct::accessor<T, dpct::local, 2>(buf1_acc_ct1, buf1_range_ct1),
-                    dpct::accessor<T, dpct::local, 2>(buf2_acc_ct1, buf2_range_ct1));
-              });
+          cgh.parallel_for(cl::sycl::nd_range<2>(global_range, thrds),
+                           [=](cl::sycl::nd_item<2> item) {
+                             gpu_matrix_multiply_tn__(
+                                 ll, lr, lc, (float *)larg, (float *)rarg,
+                                 (float *)darg, (float)scale_real, item,
+                                 gpu_error_count_ptr, buf1_acc, buf2_acc);
+                           });
         });
         break;
       case R8:
-        (*sycl_stream)->submit([&](sycl::handler &cgh) {
-          sycl::range buf1_range_ct(17 /*MAT_MULT_TILE_DIMX+1*/, 17 /*MAT_MULT_TILE_DIMX+1*/);
-          sycl::range buf2_range_ct(17 /*MAT_MULT_TILE_DIMY+1*/, 17 /*MAT_MULT_TILE_DIMX+1*/);
+        (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+          local_accessor<T, 2> buf1_acc(buf1_range, cgh);
+          local_accessor<T, 2> buf2_acc(buf2_range, cgh);
 
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 2, sycl::access::mode::read_write, sycl::access::target::local> buf1_acc_ct(buf1_range_ct1, cgh);
-          sycl::accessor<T, 2, sycl::access::mode::read_write, sycl::access::target::local> buf2_acc_ct(buf2_range_ct1, cgh);
-          auto global_range = blcks * thrds;
-
-          cgh.parallel_for(sycl::nd_range(sycl::range(global_range.get(2),
-						      global_range.get(1),
-						      global_range.get(0)),
-					  sycl::range(thrds.get(2), thrds.get(1), thrds.get(0))),
-			   [=](sycl::nd_item<3> item_ct) {
-			     gpu_matrix_multiply_tn__(ll, lr, lc, (double *)larg, (double *)rarg, (double *)darg,
-						      scale_real, item_ct, gpu_error_count_ptr_ct1,
-						      dpct::accessor<T, dpct::local, 2>(buf1_acc_ct1,
-											buf1_range_ct1),
-						      dpct::accessor<T, dpct::local, 2>(buf2_acc_ct1,
-											buf2_range_ct1));
-			   });
+          cgh.parallel_for(cl::sycl::nd_range<2>(global_range, thrds),
+                           [=](cl::sycl::nd_item<2> item) {
+                             gpu_matrix_multiply_tn__(
+                                 ll, lr, lc, (double *)larg, (double *)rarg,
+                                 (double *)darg, (double)scale_real, item,
+                                 gpu_error_count_ptr, buf1_acc, buf2_acc);
+                           });
         });
         break;
       default: //`Add complex cases with and without conjugation
@@ -15804,360 +13388,411 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         bx = MAX_SYCL_BLOCKS;
       switch (dtens->data_kind) {
       case R4:
-        (*sycl_stream)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
 
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (float *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (float *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
       case R8:
-        (*sycl_stream)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
 
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (double *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (double *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
       case C4:
         if (fast_math == YEP) {
-          (*sycl_stream)->submit([&](sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+            auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-            sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-            sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-            sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-            sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-            sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            local_accessor<T, 1> buf0_acc(
+                cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+            local_accessor<float, 0> val_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> ftb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<size_t, 1> gtb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> htb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> stb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> dim_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> dim_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> o2n_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> pri_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> tmp0_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 0> err_code_acc(cgh);
+            local_accessor<int, 0> minor_acc(cgh);
+            local_accessor<int, 0> minor_in_acc(cgh);
+            local_accessor<int, 0> minor_out_acc(cgh);
+            local_accessor<int, 0> s1_ind_acc(cgh);
+            local_accessor<int, 0> s1_ond_acc(cgh);
+            local_accessor<int, 0> s1_step_acc(cgh);
+            local_accessor<int, 0> s1_dim_acc(cgh);
+            local_accessor<int, 0> s2_ind_acc(cgh);
+            local_accessor<int, 0> s2_ond_acc(cgh);
+            local_accessor<int, 0> s2_step_acc(cgh);
+            local_accessor<int, 0> s2_dim_acc(cgh);
+            local_accessor<int, 0> ns1_acc(cgh);
+            local_accessor<int, 0> ns2_acc(cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 0> vol_ext_acc(cgh);
+            auto const_args_dims_acc = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
 
-            auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
-            auto dtens_tmp_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
-            auto dtens_dst_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
+            auto sycl_task_tens_args_const_mem_entry3 =
+                sycl_task->tens_args[0].const_mem_entry;
+            auto dtens_tmp_rsc_gmem_p4 =
+                (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
+            auto dtens_dst_rsc_gmem_p5 =
+                (talshComplex4 *)(dtens->dst_rsc->gmem_p);
 
             cgh.parallel_for(
-                sycl::nd_range(sycl::range(1, 1, bx) *
-                                   sycl::range(1, 1, THRDS_TENSOR_COPY),
-                               sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                [=](sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                      THRDS_TENSOR_COPY),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_cmplx_split_in_dlf__(
-                      1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                      dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                      val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                      base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                      gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                      stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                      dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                      n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                      tmp0_acc_ct1.get_pointer(),
-                      err_code_acc_ct1.get_pointer(),
-                      minor_acc_ct1.get_pointer(),
-                      minor_in_acc_ct1.get_pointer(),
-                      minor_out_acc_ct1.get_pointer(),
-                      s1_ind_acc_ct1.get_pointer(),
-                      s1_ond_acc_ct1.get_pointer(),
-                      s1_step_acc_ct1.get_pointer(),
-                      s1_dim_acc_ct1.get_pointer(),
-                      s2_ind_acc_ct1.get_pointer(),
-                      s2_ond_acc_ct1.get_pointer(),
-                      s2_step_acc_ct1.get_pointer(),
-                      s2_dim_acc_ct1.get_pointer(), ns1_acc_ct1.get_pointer(),
-                      ns2_acc_ct1.get_pointer(), vol_acc_ct1.get_pointer(),
-                      vol_ext_acc_ct1.get_pointer());
+                      1, 0, drank, sycl_task_tens_args_const_mem_entry3,
+                      dtens_tmp_rsc_gmem_p4, dtens_dst_rsc_gmem_p5, item,
+                      const_args_dims_acc, const_args_prmn_acc,
+                      gpu_error_count_ptr, buf0_acc.get_pointer(),
+                      val_acc.get_pointer(), base_in_acc.get_pointer(),
+                      base_out_acc.get_pointer(), ftb_acc.get_pointer(),
+                      gtb_acc.get_pointer(), htb_acc.get_pointer(),
+                      stb_acc.get_pointer(), dim_in_acc.get_pointer(),
+                      dim_out_acc.get_pointer(), o2n_acc.get_pointer(),
+                      n2o_acc.get_pointer(), pri_acc.get_pointer(),
+                      tmp0_acc.get_pointer(), err_code_acc.get_pointer(),
+                      minor_acc.get_pointer(), minor_in_acc.get_pointer(),
+                      minor_out_acc.get_pointer(), s1_ind_acc.get_pointer(),
+                      s1_ond_acc.get_pointer(), s1_step_acc.get_pointer(),
+                      s1_dim_acc.get_pointer(), s2_ind_acc.get_pointer(),
+                      s2_ond_acc.get_pointer(), s2_step_acc.get_pointer(),
+                      s2_dim_acc.get_pointer(), ns1_acc.get_pointer(),
+                      ns2_acc.get_pointer(), vol_acc.get_pointer(),
+                      vol_ext_acc.get_pointer());
                 });
           });
         } else {
-          (*sycl_stream)->submit([&](sycl::handler &cgh) {
-            auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+          (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+            auto gpu_error_count_ptr = gpu_error_count.get_ptr();
 
-            sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-            sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-            sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-            sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-            sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-            sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
-            auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-            auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+            local_accessor<T, 1> buf0_acc(
+                cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+            local_accessor<float, 0> val_acc(cgh);
+            local_accessor<size_t, 1> base_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> base_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<size_t, 1> ftb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<size_t, 1> gtb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> htb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> stb_acc(
+                cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+            local_accessor<int, 1> dim_in_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> dim_out_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> o2n_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> n2o_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> pri_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 1> tmp0_acc(
+                cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+            local_accessor<int, 0> err_code_acc(cgh);
+            local_accessor<int, 0> minor_acc(cgh);
+            local_accessor<int, 0> minor_in_acc(cgh);
+            local_accessor<int, 0> minor_out_acc(cgh);
+            local_accessor<int, 0> s1_ind_acc(cgh);
+            local_accessor<int, 0> s1_ond_acc(cgh);
+            local_accessor<int, 0> s1_step_acc(cgh);
+            local_accessor<int, 0> s1_dim_acc(cgh);
+            local_accessor<int, 0> s2_ind_acc(cgh);
+            local_accessor<int, 0> s2_ond_acc(cgh);
+            local_accessor<int, 0> s2_step_acc(cgh);
+            local_accessor<int, 0> s2_dim_acc(cgh);
+            local_accessor<int, 0> ns1_acc(cgh);
+            local_accessor<int, 0> ns2_acc(cgh);
+            local_accessor<size_t, 0> vol_acc(cgh);
+            local_accessor<size_t, 0> vol_ext_acc(cgh);
+            auto const_args_dims_acc = const_args_dims.get_access(cgh);
+            auto const_args_prmn_acc = const_args_prmn.get_access(cgh);
 
-            auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
-            auto dtens_tmp_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
-            auto dtens_dst_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
+            auto sycl_task_tens_args_const_mem_entry3 =
+                sycl_task->tens_args[0].const_mem_entry;
+            auto dtens_tmp_rsc_gmem_p4 =
+                (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
+            auto dtens_dst_rsc_gmem_p5 =
+                (talshComplex4 *)(dtens->dst_rsc->gmem_p);
 
             cgh.parallel_for(
-                sycl::nd_range(sycl::range(1, 1, bx) *
-                                   sycl::range(1, 1, THRDS_TENSOR_COPY),
-                               sycl::range(1, 1, THRDS_TENSOR_COPY)),
-                [=](sycl::nd_item<3> item_ct) {
+                cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY,
+                                      THRDS_TENSOR_COPY),
+                [=](cl::sycl::nd_item<1> item) {
                   gpu_tensor_block_copy_dlf__(
-                      1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                      dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5,
-                      item_ct, const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                      gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                      val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                      base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                      gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                      stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                      dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                      n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                      tmp0_acc_ct1.get_pointer(),
-                      err_code_acc_ct1.get_pointer(),
-                      minor_acc_ct1.get_pointer(),
-                      minor_in_acc_ct1.get_pointer(),
-                      minor_out_acc_ct1.get_pointer(),
-                      s1_ind_acc_ct1.get_pointer(),
-                      s1_ond_acc_ct1.get_pointer(),
-                      s1_step_acc_ct1.get_pointer(),
-                      s1_dim_acc_ct1.get_pointer(),
-                      s2_ind_acc_ct1.get_pointer(),
-                      s2_ond_acc_ct1.get_pointer(),
-                      s2_step_acc_ct1.get_pointer(),
-                      s2_dim_acc_ct1.get_pointer(), ns1_acc_ct1.get_pointer(),
-                      ns2_acc_ct1.get_pointer(), vol_acc_ct1.get_pointer(),
-                      vol_ext_acc_ct1.get_pointer());
+                      1, 0, drank, sycl_task_tens_args_const_mem_entry3,
+                      dtens_tmp_rsc_gmem_p4, dtens_dst_rsc_gmem_p5, item,
+                      const_args_dims_acc, const_args_prmn_acc,
+                      gpu_error_count_ptr, buf0_acc.get_pointer(),
+                      val_acc.get_pointer(), base_in_acc.get_pointer(),
+                      base_out_acc.get_pointer(), ftb_acc.get_pointer(),
+                      gtb_acc.get_pointer(), htb_acc.get_pointer(),
+                      stb_acc.get_pointer(), dim_in_acc.get_pointer(),
+                      dim_out_acc.get_pointer(), o2n_acc.get_pointer(),
+                      n2o_acc.get_pointer(), pri_acc.get_pointer(),
+                      tmp0_acc.get_pointer(), err_code_acc.get_pointer(),
+                      minor_acc.get_pointer(), minor_in_acc.get_pointer(),
+                      minor_out_acc.get_pointer(), s1_ind_acc.get_pointer(),
+                      s1_ond_acc.get_pointer(), s1_step_acc.get_pointer(),
+                      s1_dim_acc.get_pointer(), s2_ind_acc.get_pointer(),
+                      s2_ond_acc.get_pointer(), s2_step_acc.get_pointer(),
+                      s2_dim_acc.get_pointer(), ns1_acc.get_pointer(),
+                      ns2_acc.get_pointer(), vol_acc.get_pointer(),
+                      vol_ext_acc.get_pointer());
                 });
           });
         }
         break;
       case C8:
-        (*sycl_stream)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<T, 1, sycl::access::mode::read_write, sycl::access::target::local> buf0_acc_ct(sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
-          sycl::accessor<float, 0, sycl::access::mode::read_write, sycl::access::target::local> val_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> ftb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> gtb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> htb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> stb_acc_ct(sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> dim_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> o2n_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> pri_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> tmp0_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> err_code_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_in_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> minor_out_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s1_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ind_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_ond_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_step_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> s2_dim_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns1_acc_ct(cgh);
-          sycl::accessor<int, 0, sycl::access::mode::read_write, sycl::access::target::local> ns2_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_ext_acc_ct(cgh);
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          local_accessor<T, 1> buf0_acc(
+              cl::sycl::range(1536 /*TENS_TRANSP_BUF_SIZE*/), cgh);
+          local_accessor<float, 0> val_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> ftb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<size_t, 1> gtb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> htb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> stb_acc(
+              cl::sycl::range(69 /*TENS_TRANSP_TAB_SIZE*/), cgh);
+          local_accessor<int, 1> dim_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> dim_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> o2n_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> pri_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 1> tmp0_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<int, 0> err_code_acc(cgh);
+          local_accessor<int, 0> minor_acc(cgh);
+          local_accessor<int, 0> minor_in_acc(cgh);
+          local_accessor<int, 0> minor_out_acc(cgh);
+          local_accessor<int, 0> s1_ind_acc(cgh);
+          local_accessor<int, 0> s1_ond_acc(cgh);
+          local_accessor<int, 0> s1_step_acc(cgh);
+          local_accessor<int, 0> s1_dim_acc(cgh);
+          local_accessor<int, 0> s2_ind_acc(cgh);
+          local_accessor<int, 0> s2_ond_acc(cgh);
+          local_accessor<int, 0> s2_step_acc(cgh);
+          local_accessor<int, 0> s2_dim_acc(cgh);
+          local_accessor<int, 0> ns1_acc(cgh);
+          local_accessor<int, 0> ns2_acc(cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 0> vol_ext_acc(cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
 
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (talshComplex8 *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (talshComplex8 *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY, THRDS_TENSOR_COPY),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, buf0_acc_ct1.get_pointer(),
-                    val_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer(), ftb_acc_ct1.get_pointer(),
-                    gtb_acc_ct1.get_pointer(), htb_acc_ct1.get_pointer(),
-                    stb_acc_ct1.get_pointer(), dim_in_acc_ct1.get_pointer(),
-                    dim_out_acc_ct1.get_pointer(), o2n_acc_ct1.get_pointer(),
-                    n2o_acc_ct1.get_pointer(), pri_acc_ct1.get_pointer(),
-                    tmp0_acc_ct1.get_pointer(), err_code_acc_ct1.get_pointer(),
-                    minor_acc_ct1.get_pointer(), minor_in_acc_ct1.get_pointer(),
-                    minor_out_acc_ct1.get_pointer(),
-                    s1_ind_acc_ct1.get_pointer(), s1_ond_acc_ct1.get_pointer(),
-                    s1_step_acc_ct1.get_pointer(), s1_dim_acc_ct1.get_pointer(),
-                    s2_ind_acc_ct1.get_pointer(), s2_ond_acc_ct1.get_pointer(),
-                    s2_step_acc_ct1.get_pointer(), s2_dim_acc_ct1.get_pointer(),
-                    ns1_acc_ct1.get_pointer(), ns2_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), vol_ext_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, buf0_acc_ct.get_pointer(),
+                    val_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer(), ftb_acc_ct.get_pointer(),
+                    gtb_acc_ct.get_pointer(), htb_acc_ct.get_pointer(),
+                    stb_acc_ct.get_pointer(), dim_in_acc_ct.get_pointer(),
+                    dim_out_acc_ct.get_pointer(), o2n_acc_ct.get_pointer(),
+                    n2o_acc_ct.get_pointer(), pri_acc_ct.get_pointer(),
+                    tmp0_acc_ct.get_pointer(), err_code_acc_ct.get_pointer(),
+                    minor_acc_ct.get_pointer(), minor_in_acc_ct.get_pointer(),
+                    minor_out_acc_ct.get_pointer(), s1_ind_acc_ct.get_pointer(),
+                    s1_ond_acc_ct.get_pointer(), s1_step_acc_ct.get_pointer(),
+                    s1_dim_acc_ct.get_pointer(), s2_ind_acc_ct.get_pointer(),
+                    s2_ond_acc_ct.get_pointer(), s2_step_acc_ct.get_pointer(),
+                    s2_dim_acc_ct.get_pointer(), ns1_acc_ct.get_pointer(),
+                    ns2_acc_ct.get_pointer(), vol_acc_ct.get_pointer(),
+                    vol_ext_acc_ct.get_pointer());
               });
         });
         break;
@@ -16176,113 +13811,114 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         bx = MAX_SYCL_BLOCKS;
       switch (dtens->data_kind) {
       case R4:
-        (*sycl_stream)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
 
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (float *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (float *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              sycl::nd_range(cl::sycl::range(bx * THRDS_TENSOR_COPY_SCAT),
+                             sycl::range(THRDS_TENSOR_COPY_SCAT)),
+              [=](cl::sycl::nd_item<3> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case R8:
-        (*sycl_stream)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
 
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (double *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (double *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              sycl::nd_range(cl::sycl::range(bx * THRDS_TENSOR_COPY_SCAT),
+                             sycl::range(THRDS_TENSOR_COPY_SCAT)),
+              [=](cl::sycl::nd_item<3> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case C4:
-        (*sycl_stream)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write, sycl::access::target::local> n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write, sycl::access::target::local> vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write, sycl::access::target::local> base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
 
           auto sycl_task_tens_args_const_mem_entry_ct3 = sycl_task->tens_args[0].const_mem_entry;
           auto dtens_tmp_rsc_gmem_p_ct4 = (talshComplex4 *)(dtens->tmp_rsc->gmem_p);
           auto dtens_dst_rsc_gmem_p_ct5 = (talshComplex4 *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range(cl::sycl::range(bx * THRDS_TENSOR_COPY_SCAT),
+                                 sycl::range(THRDS_TENSOR_COPY_SCAT)),
+              [=](cl::sycl::nd_item<3> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
       case C8:
-        (*sycl_stream)->submit([&](sycl::handler &cgh) {
-          auto gpu_error_count_ptr_ct1 = gpu_error_count.get_ptr();
+        (*sycl_stream)->submit([&](cl::sycl::handler &cgh) {
+          auto gpu_error_count_ptr_ct = gpu_error_count.get_ptr();
 
-          sycl::accessor<int, 1, sycl::access::mode::read_write,
-                         sycl::access::target::local>
-              n2o_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 0, sycl::access::mode::read_write,
-                         sycl::access::target::local>
-              vol_acc_ct(cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write,
-                         sycl::access::target::local>
-              base_in_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          sycl::accessor<size_t, 1, sycl::access::mode::read_write,
-                         sycl::access::target::local>
-              base_out_acc_ct(sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
-          auto const_args_dims_acc_ct1 = const_args_dims.get_access(cgh);
-          auto const_args_prmn_acc_ct1 = const_args_prmn.get_access(cgh);
+          local_accessor<int, 1> n2o_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 0> vol_acc(cgh);
+          local_accessor<size_t, 1> base_in_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          local_accessor<size_t, 1> base_out_acc(
+              cl::sycl::range(32 /*MAX_TENSOR_RANK*/), cgh);
+          auto const_args_dims_acc_ct = const_args_dims.get_access(cgh);
+          auto const_args_prmn_acc_ct = const_args_prmn.get_access(cgh);
 
           auto sycl_task_tens_args_const_mem_entry_ct3 =
               sycl_task->tens_args[0].const_mem_entry;
@@ -16292,17 +13928,16 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
               (talshComplex8 *)(dtens->dst_rsc->gmem_p);
 
           cgh.parallel_for(
-              sycl::nd_range(sycl::range(1, 1, bx) *
-                                 sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT),
-                             sycl::range(1, 1, THRDS_TENSOR_COPY_SCAT)),
-              [=](sycl::nd_item<3> item_ct) {
+              cl::sycl::nd_range<1>(bx * THRDS_TENSOR_COPY_SCAT,
+                                    THRDS_TENSOR_COPY_SCAT),
+              [=](cl::sycl::nd_item<1> item) {
                 gpu_tensor_block_copy_scatter_dlf__(
                     1, 0, drank, sycl_task_tens_args_const_mem_entry_ct3,
-                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item_ct,
-                    const_args_dims_acc_ct1, const_args_prmn_acc_ct1,
-                    gpu_error_count_ptr_ct1, n2o_acc_ct1.get_pointer(),
-                    vol_acc_ct1.get_pointer(), base_in_acc_ct1.get_pointer(),
-                    base_out_acc_ct1.get_pointer());
+                    dtens_tmp_rsc_gmem_p_ct4, dtens_dst_rsc_gmem_p_ct5, item,
+                    const_args_dims_acc_ct, const_args_prmn_acc_ct,
+                    gpu_error_count_ptr_ct, n2o_acc_ct.get_pointer(),
+                    vol_acc_ct.get_pointer(), base_in_acc_ct.get_pointer(),
+                    base_out_acc_ct.get_pointer());
               });
         });
         break;
@@ -16318,81 +13953,9 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     }
   }
   // Record a SYCL queue (output ready on GPU):
-  /*
-    DPCT1012:411:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:412:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  sycl_output_ct1 = std::chrono::high_resolution_clock::now();
+  sycl_output_ct = std::chrono::high_resolution_clock::now();
   err = 0;
-  /*
-    DPCT1000:270:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
   if (err != 0) {
-    /*
-      DPCT1001:269:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:413:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
     if (VERBOSE)
       printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_dlf):"
              " Unable to record the output event: %s\n",
@@ -16407,60 +13970,10 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
         (TWO_BITS_SET); // select bits 4,5 (destination tensor coherence)
   if (gpu_d != gpu_num && coh >= 2) { // data is not on the computing GPU and
                                       // coherence control = 2("T") or (3)"K":
-    /*
-      DPCT1003:416:
-      Migrated API
-      does not
-      return error
-      code. (*, 0)
-      is inserted.
-      You may need
-      to rewrite
-      this code.
-    */
     err = (*sycl_stream->memcpy(dtens->src_rsc->gmem_p, dtens->dst_rsc->gmem_p,
                                 dsize),
            0);
-    /*
-      DPCT1000:415:
-      Error handling
-      if-stmt was
-      detected but
-      could not be
-      rewritten.
-    */
     if (err != 0) {
-      /*
-        DPCT1001:414:
-        The statement
-        could not be
-        removed.
-      */
-      /*
-        DPCT1009:417:
-        SYCL uses
-        exceptions to
-        report errors
-        and does not
-        use the error
-        codes. The
-        original code
-        was commented
-        out and a
-        warning
-        string was
-        inserted. You
-        need to
-        rewrite this
-        code.
-      */
-      err_msg = "cudaGet"
-                "ErrorSt"
-                "ring "
-                "not "
-                "support"
-                "ed" /*cudaGetErrorString(err)*/
-          ;
       if (VERBOSE)
         printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_"
                "dlf): Destination tensor body back copy failed: %s\n",
@@ -16472,81 +13985,9 @@ int gpu_tensor_block_contract_dlf(const int *cptrn, tensBlck_t *ltens,
     gpu_stats[gpu_num].traffic_out += dsize;
   }
   // Record a SYCL queue (task finished):
-  /*
-    DPCT1012:418:
-    Detected kernel
-    execution time
-    measurement
-    pattern and
-    generated an
-    initial code
-    for time
-    measurements in
-    SYCL. You can
-    change the way
-    time is
-    measured
-    depending on
-    your goals.
-  */
-  /*
-    DPCT1024:419:
-    The original
-    code returned
-    the error code
-    that was
-    further
-    consumed by the
-    program logic.
-    This original
-    code was
-    replaced with
-    0. You may need
-    to rewrite the
-    program logic
-    consuming the
-    error code.
-  */
-  sycl_finish_ct1 = std::chrono::high_resolution_clock::now();
+  sycl_finish_ct = std::chrono::high_resolution_clock::now();
   err = 0;
-  /*
-    DPCT1000:272:
-    Error handling
-    if-stmt was
-    detected but
-    could not be
-    rewritten.
-  */
   if (err != 0) {
-    /*
-      DPCT1001:271:
-      The statement
-      could not be
-      removed.
-    */
-    /*
-      DPCT1009:420:
-      SYCL uses
-      exceptions to
-      report errors
-      and does not
-      use the error
-      codes. The
-      original code
-      was commented
-      out and a
-      warning string
-      was inserted.
-      You need to
-      rewrite this
-      code.
-    */
-    err_msg = "cudaGetE"
-              "rrorStri"
-              "ng not "
-              "supporte"
-              "d" /*cudaGetErrorString(err)*/
-        ;
     if (VERBOSE)
       printf("\n#ERROR(tensor_algebra_gpu_intel:gpu_tensor_block_contract_dlf):"
              " Unable to record the finish event: %s\n",
